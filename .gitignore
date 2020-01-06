@@ -1,3 +1,8 @@
+# Custom stuff
+rec-venv/
+scratch/
+.idea/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
