@@ -13,11 +13,12 @@ class MNISTEncoder(tfl.Layer):
     REVISITING AUXILIARY LATENT VARIABLES IN GENERATIVE MODELS, D. Lawson et al., ICLR 2019
     """
 
-    def __init__(self, latents=50, name="mnist_encoder", **kwargs):
+    def __init__(self, latents, hidden_size, name="mnist_encoder", **kwargs):
 
         super(MNISTEncoder, self).__init__(name=name, **kwargs)
 
         self.latents = latents
+        self.hidden_size = hidden_size
 
         self.layers = []
         self.loc_head = None
@@ -27,16 +28,14 @@ class MNISTEncoder(tfl.Layer):
 
         self.layers = [
             tfl.Flatten(),
-            tfl.Dense(units=300,
-                      activation="tanh"),
-            tfl.Dense(units=300,
-                      activation="tanh")
+            tfl.Dense(units=self.hidden_size),
+            tf.nn.tanh,
+            tfl.Dense(units=self.hidden_size),
+            tf.nn.tanh
         ]
 
         self.loc_head = tfl.Dense(units=self.latents)
         self.log_scale_head = tfl.Dense(units=self.latents)
-
-        super(MNISTEncoder, self).build(input_size)
 
     def call(self, tensor):
 
@@ -44,31 +43,33 @@ class MNISTEncoder(tfl.Layer):
             tensor = layer(tensor)
 
         loc = self.loc_head(tensor)
-        scale = tf.nn.softplus(self.log_scale_head(tensor)) + 1e-10
+
+        # add on small epsilon so that the variance is never 0
+        scale = tf.nn.softplus(self.log_scale_head(tensor)) + 1e-5
 
         return loc, scale
 
 
 class MNISTDecoder(tfl.Layer):
 
-    def __init__(self, name="mnist_decoder", **kwargs):
+    def __init__(self, hidden_size, name="mnist_decoder", **kwargs):
         super(MNISTDecoder, self).__init__(name=name, **kwargs)
+
+        self.hidden_size = hidden_size
 
         self.layers = []
 
     def build(self, input_size):
 
         self.layers = [
-            tfl.Dense(units=300,
-                      activation="tanh"),
-            tfl.Dense(units=300,
-                      activation="tanh"),
-            tfl.Dense(units=28 * 28,
-                      activation="sigmoid"),
+            tfl.Dense(units=self.hidden_size),
+            tf.nn.tanh,
+            tfl.Dense(units=self.hidden_size),
+            tf.nn.tanh,
+            tfl.Dense(units=28 * 28),
+            tf.nn.sigmoid,
             tfl.Reshape((28, 28, 1))
         ]
-
-        super(MNISTDecoder, self).build(input_size)
 
     def call(self, tensor):
 
@@ -80,9 +81,11 @@ class MNISTDecoder(tfl.Layer):
 
 class MNISTVAE(tf.keras.Model):
 
-    def __init__(self, prior, name="mnist_vae", **kwargs):
+    def __init__(self, prior, hidden_size=300, name="mnist_vae", **kwargs):
 
         super(MNISTVAE, self).__init__(name=name, **kwargs)
+
+        self.hidden_size = hidden_size
 
         self.latents = prior.batch_shape[0]
         self.prior = prior
@@ -90,8 +93,8 @@ class MNISTVAE(tf.keras.Model):
         self.likelihood = None
         self.kl_divergence = 0.
 
-        self.encoder = MNISTEncoder(latents=self.latents)
-        self.decoder = MNISTDecoder()
+        self.encoder = MNISTEncoder(latents=self.latents, hidden_size=self.hidden_size)
+        self.decoder = MNISTDecoder(hidden_size=self.hidden_size)
 
     def call(self, tensor, training=False):
 
@@ -106,6 +109,10 @@ class MNISTVAE(tf.keras.Model):
 
         reconstruction = self.decoder(code)
 
-        self.likelihood = tfd.Bernoulli(probs=reconstruction, dtype=tf.float32)
+        # if we massively mispredict the mean of a single pixel, its log-likelihood might become very large,
+        # hence we clip the means to a reasonable range first
+        clipped_reconstruction = tf.clip_by_value(reconstruction, 1e-7, 1 - 1e-7)
+
+        self.likelihood = tfd.Bernoulli(probs=clipped_reconstruction, dtype=tf.float32)
 
         return reconstruction

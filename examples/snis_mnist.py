@@ -1,8 +1,10 @@
 from rec.models.mnist_vae import MNISTVAE
-from rec.modules.snis_distribution import SNISDistribution
+from rec.core.modules.snis_distribution import SNISDistribution
+from rec.core.utils import setup_logger
 
 import datetime
 import argparse
+import logging
 
 import tensorflow as tf
 tfs = tf.summary
@@ -18,6 +20,8 @@ AVAILABLE_MODELS = [
     "mog",
     "snis"
 ]
+
+logger = setup_logger(__name__, level=logging.DEBUG, to_console=False, log_file=f"../logs/snis_mnist.log")
 
 
 class SNISNetwork(tfl.Layer):
@@ -53,8 +57,8 @@ class SNISNetwork(tfl.Layer):
 
 def main(args):
 
-    print(f"Tensorflow was built with CUDA: {tf.test.is_built_with_cuda()}")
-    print(f"Tensorflow is using GPU: {tf.test.is_gpu_available()}")
+    logger.info(f"Tensorflow was built with CUDA: {tf.test.is_built_with_cuda()}")
+    logger.info(f"Tensorflow is using GPU: {tf.test.is_gpu_available()}")
 
     batch_size = 128
     log_freq = 1000
@@ -77,7 +81,8 @@ def main(args):
 
     # Get model
     if args.model == "gaussian":
-        model = MNISTVAE(prior=tfd.Normal(loc=tf.zeros(50),
+        model = MNISTVAE(name="gaussian_mnist_vae",
+                         prior=tfd.Normal(loc=tf.zeros(50),
                                           scale=tf.ones(50)))
 
     elif args.model == "mog":
@@ -95,7 +100,8 @@ def main(args):
         mixture = tfd.Mixture(cat=tfd.Categorical(logits=logits),
                               components=components)
 
-        model = MNISTVAE(prior=mixture)
+        model = MNISTVAE(name="mog_mnist_vae",
+                         prior=mixture)
 
     elif args.model == "snis":
 
@@ -104,7 +110,8 @@ def main(args):
                                                   scale=tf.ones(50)),
                                  K=1024)
 
-        model = MNISTVAE(prior=prior)
+        model = MNISTVAE(name="snis_mnist_vae",
+                         prior=prior)
 
     # Get optimizer
     learn_rate = tf.Variable(3e-4)
@@ -113,7 +120,8 @@ def main(args):
     # Get checkpoint
     ckpt = tf.train.Checkpoint(step=tf.Variable(1, dtype=tf.int64),
                                learn_rate=learn_rate,
-                               model=model)
+                               model=model,
+                               optimizer=optimizer)
 
     manager = tf.train.CheckpointManager(ckpt, args.save_dir, max_to_keep=3)
 
@@ -123,14 +131,20 @@ def main(args):
 
     summary_writer = tfs.create_file_writer(log_dir)
 
+    # Initialize the model by passing zeros through it
+    model(tf.zeros([1, 28, 28, 1]))
+
     # Restore previous session
     ckpt.restore(manager.latest_checkpoint)
     if manager.latest_checkpoint:
-        print(f"Restored from {manager.latest_checkpoint}")
+        logger.info(f"Restored model from {manager.latest_checkpoint}")
     else:
-        print("Initializing from scratch.")
+        logger.info("Initializing model from scratch.")
 
     for batch in train_ds.take(args.iters - int(ckpt.step)):
+
+        # Increment the training step
+        ckpt.step.assign_add(1)
 
         # Decrease learning rate after a while
         if int(ckpt.step) == drop_learning_rate_after_iter:
@@ -140,16 +154,21 @@ def main(args):
 
             reconstruction = model(batch, training=True)
 
-            nll = -tf.reduce_mean(model.likelihood.log_prob(batch))
+            log_prob = model.likelihood.log_prob(batch)
+
+            nll = -tf.reduce_mean(log_prob)
             kl_divergence = tf.reduce_mean(model.kl_divergence)
 
             beta = tf.minimum(1., tf.cast(ckpt.step / anneal_end, tf.float32))
 
-            loss = nll + 0.1 * kl_divergence
+            loss = nll + beta * kl_divergence
+
+        if tf.reduce_min(-log_prob) > 10:
+            logger.info("Mispredicted pixel!")
 
         # Check for NaN loss
         if tf.math.is_nan(loss):
-            print("Loss was NaN, stopping!")
+            logger.error(f"Loss was NaN, stopping! nll: {nll}, KL: {kl_divergence} ")
             break
 
         gradients = tape.gradient(loss, model.trainable_variables)
@@ -157,7 +176,7 @@ def main(args):
 
         if int(ckpt.step) % log_freq == 0:
             save_path = manager.save()
-            print(f"Step {int(ckpt.step)}: Saved model to {save_path}")
+            logger.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
 
             with summary_writer.as_default():
                 tfs.scalar(name="Loss", data=loss, step=ckpt.step)
@@ -167,9 +186,6 @@ def main(args):
 
                 tfs.image(name="Original", data=batch, step=ckpt.step)
                 tfs.image(name="Reconstruction", data=reconstruction, step=ckpt.step)
-
-        # Increment the training step
-        ckpt.step.assign_add(1)
 
 
 if __name__ == "__main__":
