@@ -78,6 +78,7 @@ def main(args):
     train_ds = train_ds.shuffle(5000)
     train_ds = train_ds.repeat()
     train_ds = train_ds.batch(batch_size)
+    train_ds = train_ds.prefetch(32)
 
     # Get model
     if args.model == "gaussian":
