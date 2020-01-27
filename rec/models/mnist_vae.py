@@ -1,9 +1,11 @@
 import logging
 
 import tensorflow as tf
+
 tfl = tf.keras.layers
 
 import tensorflow_probability as tfp
+
 tfd = tfp.distributions
 
 
@@ -14,7 +16,6 @@ class MNISTEncoder(tfl.Layer):
     """
 
     def __init__(self, latents, hidden_size, name="mnist_encoder", **kwargs):
-
         super(MNISTEncoder, self).__init__(name=name, **kwargs)
 
         self.latents = latents
@@ -25,7 +26,6 @@ class MNISTEncoder(tfl.Layer):
         self.log_scale_head = None
 
     def build(self, input_size):
-
         self.layers = [
             tfl.Flatten(),
             tfl.Dense(units=self.hidden_size),
@@ -38,7 +38,6 @@ class MNISTEncoder(tfl.Layer):
         self.log_scale_head = tfl.Dense(units=self.latents)
 
     def call(self, tensor):
-
         for layer in self.layers:
             tensor = layer(tensor)
 
@@ -60,7 +59,6 @@ class MNISTDecoder(tfl.Layer):
         self.layers = []
 
     def build(self, input_size):
-
         self.layers = [
             tfl.Dense(units=self.hidden_size),
             tf.nn.tanh,
@@ -72,7 +70,6 @@ class MNISTDecoder(tfl.Layer):
         ]
 
     def call(self, tensor):
-
         for layer in self.layers:
             tensor = layer(tensor)
 
@@ -82,7 +79,6 @@ class MNISTDecoder(tfl.Layer):
 class MNISTVAE(tf.keras.Model):
 
     def __init__(self, prior, hidden_size=300, name="mnist_vae", **kwargs):
-
         super(MNISTVAE, self).__init__(name=name, **kwargs)
 
         self.hidden_size = hidden_size
@@ -97,7 +93,6 @@ class MNISTVAE(tf.keras.Model):
         self.decoder = MNISTDecoder(hidden_size=self.hidden_size)
 
     def call(self, tensor, training=False):
-
         loc, scale = self.encoder(tensor)
 
         self.posterior = tfd.Normal(loc=loc, scale=scale)
@@ -109,10 +104,66 @@ class MNISTVAE(tf.keras.Model):
 
         reconstruction = self.decoder(code)
 
-        # if we massively mispredict the mean of a single pixel, its log-likelihood might become very large,
+        # if we massively mis-predict the mean of a single pixel, its log-likelihood might become very large,
         # hence we clip the means to a reasonable range first
-        clipped_reconstruction = tf.clip_by_value(reconstruction, 1e-7, 1 - 1e-7)
+        clipped_reconstruction = tf.clip_by_value(reconstruction, 1e-10, 1 - 1e-10)
 
+        self.likelihood = tfd.Bernoulli(probs=clipped_reconstruction, dtype=tf.float32)
+
+        return reconstruction
+
+
+class MNISTVampVAE(tf.keras.Model):
+
+    def __init__(self, latents, num_vamp_components=500, hidden_size=300, name="mnist_vamp_vae", **kwargs):
+        super(MNISTVampVAE, self).__init__(name=name, **kwargs)
+
+        self.hidden_size = hidden_size
+        self.latents = latents
+        self.num_vamp_components = num_vamp_components
+
+        self.encoder = MNISTEncoder(latents=self.latents, hidden_size=self.hidden_size)
+        self.decoder = MNISTDecoder(hidden_size=self.hidden_size)
+
+        self.likelihood = None
+        self.posterior = None
+        self.kl_divergence = 0.
+
+        self.inducing_points = tf.Variable(tf.random.normal(shape=(num_vamp_components, 28, 28)))
+
+    def call(self, tensor, training=False):
+
+        loc, scale = self.encoder(tensor)
+
+        self.posterior = tfd.Normal(loc=loc, scale=scale)
+
+        code = self.posterior.sample()
+
+        if training:
+
+            prior_components_loc, prior_components_scale = self.encoder(self.inducing_points)
+
+            # tfd.MixtureSameFamily expects the component dimension to be the last one, so we permute it to be the last.
+            prior_components = tfd.Normal(loc=tf.transpose(prior_components_loc),
+                                          scale=tf.transpose(prior_components_scale))
+
+            self.prior = tfd.MixtureSameFamily(
+                mixture_distribution=tfd.Categorical(probs=[1. / self.num_vamp_components] * self.num_vamp_components),
+                components_distribution=prior_components
+            )
+
+            # All mixture weights are set to be equal
+            prior_log_liks = self.prior.log_prob(code)
+            post_log_liks = self.posterior.log_prob(code)
+
+            # We get the empirical KL for each dimension and then sum it along the dimensions
+            self.kl_divergence = post_log_liks - prior_log_liks
+
+        reconstruction = self.decoder(code)
+
+        # if we massively mis-predict the mean of a single pixel, its log-likelihood might become very large,
+        # hence we clip the means to a reasonable range first
+        clipped_reconstruction = tf.clip_by_value(reconstruction, 1e-10, 1 - 1e-10)
         self.likelihood = tfd.Bernoulli(probs=clipped_reconstruction, dtype=tf.float32)
 
         return reconstruction

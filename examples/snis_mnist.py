@@ -1,4 +1,4 @@
-from rec.models.mnist_vae import MNISTVAE
+from rec.models.mnist_vae import MNISTVAE, MNISTVampVAE
 from rec.core.modules.snis_distribution import SNISDistribution
 from rec.core.utils import setup_logger
 
@@ -18,44 +18,18 @@ import tensorflow_datasets as tfds
 AVAILABLE_MODELS = [
     "gaussian",
     "mog",
+    "vamp",
     "snis"
 ]
 
 logger = setup_logger(__name__, level=logging.DEBUG, to_console=False, log_file=f"../logs/snis_mnist.log")
 
 
-class SNISNetwork(tfl.Layer):
-    
-    def __init__(self, hidden=100, activation="tanh", name="snis_network", **kwargs):
-        
-        super(SNISNetwork, self).__init__(name=name, **kwargs)
-        
-        self.hidden = hidden
-        self.activation = activation
-       
-    def build(self, input_size): 
-        
-        self.layers = [
-            tfl.Dense(units=self.hidden,
-                      activation=self.activation),
-            tfl.Dense(units=self.hidden,
-                      activation=self.activation),
-            tfl.Dense(units=1,
-                      activation=None)
-        ]
-        
-        super(SNISNetwork, self).build(input_size)
-        
-    def call(self, tensor):
-          
-        for layer in self.layers:
-            
-            tensor = layer(tensor)
-            
-        return tensor
-
-
 def main(args):
+
+    logger.info("========================================")
+    logger.info(f"Training a VAE with {args.model} prior.")
+    logger.info("========================================")
 
     logger.info(f"Tensorflow was built with CUDA: {tf.test.is_built_with_cuda()}")
     logger.info(f"Tensorflow is using GPU: {tf.test.is_gpu_available()}")
@@ -88,25 +62,38 @@ def main(args):
 
     elif args.model == "mog":
 
-        num_components = 20
+        num_components = 100
 
-        logits = tf.Variable(tf.random.uniform(shape=(50, num_components), minval=-1., maxval=1.))
-        loc = tf.Variable(tf.random.uniform(shape=(num_components, 50), minval=-1., maxval=1.))
-        log_scale = tf.Variable(tf.random.uniform(shape=(num_components, 50), minval=-1., maxval=1.))
+        loc = tf.Variable(tf.random.uniform(shape=(50, num_components), minval=-1., maxval=1.))
+        log_scale = tf.Variable(tf.random.uniform(shape=(50, num_components), minval=-1., maxval=1.))
 
-        scale = 1e-4 + tf.nn.softplus(log_scale)
+        scale = 1e-5 + tf.nn.softplus(log_scale)
 
-        components = [tfd.Normal(loc=loc[i, :], scale=scale[i, :]) for i in range(num_components)]
+        components = tfd.Normal(loc=loc,
+                                scale=scale)
 
-        mixture = tfd.Mixture(cat=tfd.Categorical(logits=logits),
-                              components=components)
+        mixture = tfd.MixtureSameFamily(mixture_distribution=tfd.Categorical(probs=[1. / num_components] * num_components),
+                                        components_distribution=components)
 
         model = MNISTVAE(name="mog_mnist_vae",
                          prior=mixture)
 
+    elif args.model == "vamp":
+
+        model = MNISTVampVAE(name="vamp_mnist_vae",
+                             latents=50)
+
     elif args.model == "snis":
 
-        prior = SNISDistribution(energy_fn=SNISNetwork(hidden=100),
+        snis_network = tf.keras.Sequential([
+            tfl.Dense(units=100,
+                      activation=tf.nn.tanh),
+            tfl.Dense(units=100,
+                      activation=tf.nn.tanh),
+            tfl.Dense(units=1)
+        ])
+
+        prior = SNISDistribution(energy_fn=snis_network,
                                  prior=tfd.Normal(loc=tf.zeros(50),
                                                   scale=tf.ones(50)),
                                  K=1024)
@@ -157,8 +144,11 @@ def main(args):
 
             log_prob = model.likelihood.log_prob(batch)
 
-            nll = -tf.reduce_mean(log_prob)
-            kl_divergence = tf.reduce_mean(model.kl_divergence)
+            # Get the empirical log-likelihood per image
+            nll = -tf.reduce_mean(tf.reduce_sum(log_prob, axis=[1, 2]))
+
+            # Get the empirical KL per latent code
+            kl_divergence = tf.reduce_mean(tf.reduce_sum(model.kl_divergence, axis=1))
 
             beta = tf.minimum(1., tf.cast(ckpt.step / anneal_end, tf.float32))
 

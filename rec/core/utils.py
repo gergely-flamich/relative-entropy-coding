@@ -1,6 +1,5 @@
 import logging
 
-
 class CoreError(Exception):
     """
     Base error thrown by modules in the core
