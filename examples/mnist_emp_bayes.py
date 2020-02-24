@@ -57,15 +57,15 @@ def main(args):
     # Get model
     if args.model == "gaussian":
         model = MNISTVAE(name="gaussian_mnist_vae",
-                         prior=tfd.Normal(loc=tf.zeros(50),
-                                          scale=tf.ones(50)))
+                         prior=tfd.Normal(loc=tf.zeros(args.latent_dim),
+                                          scale=tf.ones(args.latent_dim)))
 
     elif args.model == "mog":
 
         num_components = 100
 
-        loc = tf.Variable(tf.random.uniform(shape=(50, num_components), minval=-1., maxval=1.))
-        log_scale = tf.Variable(tf.random.uniform(shape=(50, num_components), minval=-1., maxval=1.))
+        loc = tf.Variable(tf.random.uniform(shape=(args.latent_dim, num_components), minval=-1., maxval=1.))
+        log_scale = tf.Variable(tf.random.uniform(shape=(args.latent_dim, num_components), minval=-1., maxval=1.))
 
         scale = 1e-5 + tf.nn.softplus(log_scale)
 
@@ -81,7 +81,7 @@ def main(args):
     elif args.model == "vamp":
 
         model = MNISTVampVAE(name="vamp_mnist_vae",
-                             latents=50)
+                             latents=args.latent_dim)
 
     elif args.model == "snis":
 
@@ -94,8 +94,8 @@ def main(args):
         ])
 
         prior = SNISDistribution(energy_fn=snis_network,
-                                 prior=tfd.Normal(loc=tf.zeros(50),
-                                                  scale=tf.ones(50)),
+                                 prior=tfd.Normal(loc=tf.zeros(args.latent_dim),
+                                                  scale=tf.ones(args.latent_dim)),
                                  K=1024)
 
         model = MNISTVAE(name="snis_mnist_vae",
@@ -129,6 +129,11 @@ def main(args):
     else:
         logger.info("Initializing model from scratch.")
 
+    num_loss_was_nan = 0
+
+    tau = 100
+    tau = tf.cast(tau, dtype=tf.float32)
+
     for batch in train_ds.take(args.iters - int(ckpt.step)):
 
         # Increment the training step
@@ -150,33 +155,65 @@ def main(args):
             # Get the empirical KL per latent code
             kl_divergence = tf.reduce_mean(tf.reduce_sum(model.kl_divergence, axis=1))
 
+            # Soft relaxation of the maximum KL
+            soft_max_kl_divergence = 1 / tau * tf.reduce_mean(tf.reduce_logsumexp(model.kl_divergence * tau, axis=1))
+
             beta = tf.minimum(1., tf.cast(ckpt.step / anneal_end, tf.float32))
 
-            loss = nll + beta * kl_divergence
+            gamma = tf.minimum(args.latent_dim, tf.maximum(0., tf.cast(ckpt.step / anneal_end - 0.8, tf.float32)))
+
+            loss = nll + (beta - gamma / args.latent_dim) * kl_divergence + gamma * soft_max_kl_divergence
 
         if tf.reduce_min(-log_prob) > 10:
             logger.info("Mispredicted pixel!")
 
         # Check for NaN loss
         if tf.math.is_nan(loss):
-            logger.error(f"Loss was NaN, stopping! nll: {nll}, KL: {kl_divergence} ")
-            break
+            num_loss_was_nan += 1
+
+            if num_loss_was_nan > 50:
+                logger.error(f"Loss was NaN, stopping! nll: {nll}, KL: {kl_divergence} ")
+                break
+            else:
+                logger.error(f"Loss was NaN, continuing for now {num_loss_was_nan}/10! nll: {nll}, KL: {kl_divergence} ")
+                continue
 
         gradients = tape.gradient(loss, model.trainable_variables)
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
         if int(ckpt.step) % log_freq == 0:
+
+            # Get empirical posterior and prior log likelihoods for summaries
+            post_log_lik = tf.reduce_mean(tf.reduce_sum(model.post_log_liks, axis=1))
+            prior_log_lik = tf.reduce_mean(tf.reduce_sum(model.prior_log_liks, axis=1))
+
+            expected_max_kl = tf.reduce_mean(tf.reduce_max(model.kl_divergence, axis=1))
+
+            # Save model
             save_path = manager.save()
             logger.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
 
             with summary_writer.as_default():
                 tfs.scalar(name="Loss", data=loss, step=ckpt.step)
                 tfs.scalar(name="NLL", data=nll, step=ckpt.step)
+                tfs.scalar(name="Posterior_LL", data=post_log_lik, step=ckpt.step)
+                tfs.scalar(name="Prior_LL", data=prior_log_lik, step=ckpt.step)
                 tfs.scalar(name="KL", data=kl_divergence, step=ckpt.step)
+
                 tfs.scalar(name="Beta", data=beta, step=ckpt.step)
 
                 tfs.image(name="Original", data=batch, step=ckpt.step)
                 tfs.image(name="Reconstruction", data=reconstruction, step=ckpt.step)
+
+                tfs.scalar(name="Expected_Max_KL", data=expected_max_kl, step=ckpt.step)
+                tfs.scalar(name="Max_Soft_Max_KL_Diff", data=expected_max_kl - soft_max_kl_divergence, step=ckpt.step)
+                tfs.scalar(name="Average_Max_KL_Diff", data=kl_divergence / args.latent_dim - expected_max_kl,
+                           step=ckpt.step)
+                tfs.scalar(name="Gamma", data=gamma, step=ckpt.step)
+
+                # If we are using the VampPrior VAE, then log the evolution of the inducing points
+                if args.model == "vamp":
+                    tfs.image(name="Inducing Points", data=model.inducing_points, step=ckpt.step)
 
 
 if __name__ == "__main__":
@@ -193,6 +230,7 @@ if __name__ == "__main__":
                         help="Path for the model checkpoints.")
 
     parser.add_argument("--iters", type=int, default=10000000)
+    parser.add_argument("--latent_dim", type=int, default=50)
 
     args = parser.parse_args()
 

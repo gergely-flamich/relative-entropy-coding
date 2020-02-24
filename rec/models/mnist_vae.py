@@ -100,6 +100,9 @@ class MNISTVAE(tf.keras.Model):
         code = self.posterior.sample()
 
         if training:
+            self.prior_log_liks = self.prior.log_prob(code)
+            self.post_log_liks = self.posterior.log_prob(code)
+
             self.kl_divergence = self.posterior.log_prob(code) - self.prior.log_prob(code)
 
         reconstruction = self.decoder(code)
@@ -129,7 +132,10 @@ class MNISTVampVAE(tf.keras.Model):
         self.posterior = None
         self.kl_divergence = 0.
 
-        self.inducing_points = tf.Variable(tf.random.normal(shape=(num_vamp_components, 28, 28)))
+        # Initialize inducing points to random white noise images
+        self.inducing_points = tf.Variable(tf.random.uniform(shape=(num_vamp_components, 28, 28, 1),
+                                                             minval=0.,
+                                                             maxval=1.))
 
     def call(self, tensor, training=False):
 
@@ -153,17 +159,17 @@ class MNISTVampVAE(tf.keras.Model):
             )
 
             # All mixture weights are set to be equal
-            prior_log_liks = self.prior.log_prob(code)
-            post_log_liks = self.posterior.log_prob(code)
+            self.prior_log_liks = self.prior.log_prob(code)
+            self.post_log_liks = self.posterior.log_prob(code)
 
             # We get the empirical KL for each dimension and then sum it along the dimensions
-            self.kl_divergence = post_log_liks - prior_log_liks
+            self.kl_divergence = self.post_log_liks - self.prior_log_liks
 
         reconstruction = self.decoder(code)
 
         # if we massively mis-predict the mean of a single pixel, its log-likelihood might become very large,
         # hence we clip the means to a reasonable range first
-        clipped_reconstruction = tf.clip_by_value(reconstruction, 1e-10, 1 - 1e-10)
+        clipped_reconstruction = tf.clip_by_value(reconstruction, 1e-6, 1 - 1e-6)
         self.likelihood = tfd.Bernoulli(probs=clipped_reconstruction, dtype=tf.float32)
 
         return reconstruction

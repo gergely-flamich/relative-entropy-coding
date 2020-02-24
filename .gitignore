@@ -1,5 +1,6 @@
 # Log directory
 logs/
+experimental_data/
 
 # Custom stuff
 rec-venv/
