@@ -169,7 +169,8 @@ class MNISTVampVAE(tf.keras.Model):
 
         # if we massively mis-predict the mean of a single pixel, its log-likelihood might become very large,
         # hence we clip the means to a reasonable range first
-        clipped_reconstruction = tf.clip_by_value(reconstruction, 1e-6, 1 - 1e-6)
+        # tf.clip_by_value(reconstruction, 1e-6, 1 - 1e-6)
+        clipped_reconstruction = 1e-7 + (1 - 2e-7) * tf.nn.sigmoid(reconstruction)
         self.likelihood = tfd.Bernoulli(probs=clipped_reconstruction, dtype=tf.float32)
 
         return reconstruction
