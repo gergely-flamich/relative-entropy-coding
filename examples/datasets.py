@@ -15,6 +15,9 @@ def data_config():
     # Can be 'train' or 'test'
     split = "train"
 
+    num_pixels = 28 * 28
+    num_channels = 1
+
     normalize = True
 
 
@@ -28,14 +31,17 @@ def binarized_mnist():
 
 @data_ingredient.named_config
 def cifar_10():
-    tfds_name = "cifar-10"
-    dataset_path = "/scratch/gf332/datasets/cifar-10"
+    tfds_name = "cifar10"
+    dataset_path = "/scratch/gf332/datasets/cifar10"
+
+    num_pixels = 32 * 32
+    num_channels = 3
 
     normalize = True
 
 
 @data_ingredient.capture
-def load_dataset(tfds_name, dataset_path, split, normalize):
+def load_dataset(tfds_name, dataset_path, split, normalize, num_pixels, num_channels):
 
     ds = tfds.load(tfds_name,
                    data_dir=dataset_path)
@@ -46,4 +52,4 @@ def load_dataset(tfds_name, dataset_path, split, normalize):
 
     ds = ds.map(lambda x: tf.cast(x["image"], tf.float32) / normalizer)
 
-    return ds
+    return ds, num_pixels, num_channels

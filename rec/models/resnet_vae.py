@@ -3,6 +3,8 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
+from .custom_modules.reparameterized_convolutions import ReparameterizedConv2D, ReparameterizedConv2DTranspose
+
 tfl = tf.keras.layers
 tfk = tf.keras
 tfd = tfp.distributions
@@ -14,14 +16,19 @@ class BidirectionalResidualBlock(tfl.Layer):
     """
 
     def __init__(self,
-                 filters,
+                 stochastic_filters,
+                 deterministic_filters,
                  kernel_size=(3, 3),
                  name="bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
 
-        self.filters = filters
+        # Number of filters for the stochastic layers
+        self.stochastic_filters = stochastic_filters
+
+        # Number of filters for the deterministic residual features
+        self.deterministic_filters = deterministic_filters
         self.kernel_size = kernel_size
 
         # ---------------------------------------------------------------------
@@ -74,62 +81,62 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
         # Stuff for the inference side
         # ---------------------------------------------------------------------
-        self.infer_conv1 = tfl.Conv2D(filters=self.filters,
-                                      kernel_size=self.kernel_size,
-                                      strides=(1, 1),
-                                      padding="same")
+        self.infer_conv1 = ReparameterizedConv2D(filters=self.deterministic_filters,
+                                                 kernel_size=self.kernel_size,
+                                                 strides=(1, 1),
+                                                 padding="same")
 
-        self.infer_conv2 = tfl.Conv2D(filters=self.filters,
-                                      kernel_size=self.kernel_size,
-                                      strides=(1, 1),
-                                      padding="same")
+        self.infer_conv2 = ReparameterizedConv2D(filters=self.deterministic_filters,
+                                                 kernel_size=self.kernel_size,
+                                                 strides=(1, 1),
+                                                 padding="same")
 
-        self.infer_posterior_loc_head = tfl.Conv2D(filters=self.filters,
-                                                   kernel_size=self.kernel_size,
-                                                   strides=(1, 1),
-                                                   padding="same")
+        self.infer_posterior_loc_head = ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                              kernel_size=self.kernel_size,
+                                                              strides=(1, 1),
+                                                              padding="same")
 
-        self.infer_posterior_log_scale_head = tfl.Conv2D(filters=self.filters,
-                                                         kernel_size=self.kernel_size,
-                                                         strides=(1, 1),
-                                                         padding="same")
+        self.infer_posterior_log_scale_head = ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                                    kernel_size=self.kernel_size,
+                                                                    strides=(1, 1),
+                                                                    padding="same")
 
         # ---------------------------------------------------------------------
         # Stuff for the generative side
         # ---------------------------------------------------------------------
-        self.gen_conv1 = tfl.Conv2DTranspose(filters=self.filters,
-                                             kernel_size=self.kernel_size,
-                                             strides=(1, 1),
-                                             padding="same")
-
-        self.gen_conv2 = tfl.Conv2DTranspose(filters=self.filters,
-                                             kernel_size=self.kernel_size,
-                                             strides=(1, 1),
-                                             padding="same")
-
-        self.prior_loc_head = tfl.Conv2DTranspose(filters=self.filters,
-                                                  kernel_size=self.kernel_size,
-                                                  strides=(1, 1),
-                                                  padding="same")
-
-        self.prior_log_scale_head = tfl.Conv2DTranspose(filters=self.filters,
+        self.gen_conv1 = ReparameterizedConv2DTranspose(filters=self.deterministic_filters,
                                                         kernel_size=self.kernel_size,
                                                         strides=(1, 1),
                                                         padding="same")
 
-        self.gen_posterior_loc_head = tfl.Conv2DTranspose(filters=self.filters,
-                                                          kernel_size=self.kernel_size,
-                                                          strides=(1, 1),
-                                                          padding="same")
+        self.gen_conv2 = ReparameterizedConv2DTranspose(filters=self.deterministic_filters,
+                                                        kernel_size=self.kernel_size,
+                                                        strides=(1, 1),
+                                                        padding="same")
 
-        self.gen_posterior_log_scale_head = tfl.Conv2DTranspose(filters=self.filters,
-                                                                kernel_size=self.kernel_size,
-                                                                strides=(1, 1),
-                                                                padding="same")
+        self.prior_loc_head = ReparameterizedConv2DTranspose(filters=self.stochastic_filters,
+                                                             kernel_size=self.kernel_size,
+                                                             strides=(1, 1),
+                                                             padding="same")
+
+        self.prior_log_scale_head = ReparameterizedConv2DTranspose(filters=self.stochastic_filters,
+                                                                   kernel_size=self.kernel_size,
+                                                                   strides=(1, 1),
+                                                                   padding="same")
+
+        self.gen_posterior_loc_head = ReparameterizedConv2DTranspose(filters=self.stochastic_filters,
+                                                                     kernel_size=self.kernel_size,
+                                                                     strides=(1, 1),
+                                                                     padding="same")
+
+        self.gen_posterior_log_scale_head = ReparameterizedConv2DTranspose(filters=self.stochastic_filters,
+                                                                           kernel_size=self.kernel_size,
+                                                                           strides=(1, 1),
+                                                                           padding="same")
 
         super().build(input_shape=input_shape)
 
-    def call(self, tensor, latent_code=None, inference_pass=True):
+    def call(self, tensor, latent_code=None, inference_pass=True, eps=1e-7):
         """
 
         :param tensor: data to be passed through the residual block
@@ -154,13 +161,17 @@ class BidirectionalResidualBlock(tfl.Layer):
 
             # Calculate first part of posterior statistics
             self.infer_posterior_loc = self.infer_posterior_loc_head(tensor)
-            self.infer_posterior_scale = tf.math.exp(self.infer_posterior_log_scale_head(tensor))
+            self.infer_posterior_scale = tf.nn.softplus(self.infer_posterior_log_scale_head(tensor)) + eps
 
             # Calculate next set of deterministic feautres
             tensor = self.infer_conv1(tensor)
             tensor = tf.nn.elu(tensor)
 
             tensor = self.infer_conv2(tensor)
+
+            # Add residual connection, scale factor taken from
+            # https://github.com/hilloc-submission/hilloc/blob/b89e9c983e3764798e7c6f81f5cfc1d11b349d96/experiments/rvae/model/__init__.py#L53
+            tensor = original_tensor + 0.1 * tensor
 
         # ---------------------------------------------------------------------
         # Generative pass
@@ -170,7 +181,7 @@ class BidirectionalResidualBlock(tfl.Layer):
             if latent_code is None:
                 # Calculate second part of posterior statistics
                 self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
-                self.gen_posterior_scale = tf.math.exp(self.gen_posterior_log_scale_head(tensor))
+                self.gen_posterior_scale = tf.nn.softplus(self.gen_posterior_log_scale_head(tensor)) + eps
 
                 # Sample from posterior
                 self.posterior = tfd.Normal(loc=self.posterior_loc,
@@ -180,21 +191,23 @@ class BidirectionalResidualBlock(tfl.Layer):
 
             # Calculate prior parameters
             self.prior_loc = self.prior_loc_head(tensor)
-            self.prior_scale = tf.math.exp(self.prior_log_scale_head(tensor))
+            self.prior_scale = tf.nn.softplus(self.prior_log_scale_head(tensor)) + eps
 
             self.prior = tfd.Normal(loc=self.prior_loc,
                                     scale=self.prior_scale)
 
             # Calculate next set of deterministic features for residual block
             tensor = self.gen_conv1(tensor)
-            tensor = tf.nn.elu(tensor)
 
             # Concatenate code and generative features. The channels are always the last axis
             tensor = tf.concat([tensor, latent_code], axis=-1)
+
+            tensor = tf.nn.elu(tensor)
             tensor = self.gen_conv2(tensor)
 
-        # Add residual connection
-        tensor = original_tensor + tensor
+            # Add residual connection. Scaling factor taken from
+            #https://github.com/hilloc-submission/hilloc/blob/b89e9c983e3764798e7c6f81f5cfc1d11b349d96/experiments/rvae/model/__init__.py#L116
+            tensor = original_tensor + 0.1 * tensor
 
         return tensor
 
@@ -211,10 +224,11 @@ class BidirectionalResNetVAE(tfk.Model):
                  num_res_blocks,
                  first_kernel_size=(5, 5),
                  first_strides=(2, 2),
-                 first_filters=32,
                  kernel_size=(3, 3),
                  strides=(1, 1),
-                 filters=32,
+                 deterministic_filters=160,
+                 stochastic_filters=32,
+                 latent_size="variable",
                  name="resnet_vae",
                  **kwargs):
         super().__init__(name=name,
@@ -227,11 +241,11 @@ class BidirectionalResNetVAE(tfk.Model):
 
         self.first_kernel_size = first_kernel_size
         self.first_strides = first_strides
-        self.first_filters = first_filters
 
         self.kernel_size = kernel_size
         self.strides = strides
-        self.filters = filters
+        self.stochastic_filters = stochastic_filters
+        self.deterministic_filters = deterministic_filters
 
         # ---------------------------------------------------------------------
         # Create parameters
@@ -241,20 +255,21 @@ class BidirectionalResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         # Create ResNet Layers
         # ---------------------------------------------------------------------
-        self.first_infer_conv = tfl.Conv2D(kernel_size=self.first_kernel_size,
-                                           strides=self.first_strides,
-                                           filters=self.first_filters,
-                                           padding="same")
+        self.first_infer_conv = ReparameterizedConv2D(kernel_size=self.first_kernel_size,
+                                                      strides=self.first_strides,
+                                                      filters=self.deterministic_filters,
+                                                      padding="same")
 
-        self.last_gen_conv = tfl.Conv2DTranspose(kernel_size=self.first_kernel_size,
-                                                 strides=self.first_strides,
-                                                 filters=3,
-                                                 padding="same")
+        self.last_gen_conv = ReparameterizedConv2DTranspose(kernel_size=self.first_kernel_size,
+                                                            strides=self.first_strides,
+                                                            filters=3,
+                                                            padding="same")
 
         # We create these in topological order.
         # This means that residual_blocks[0] will have the bottom-most stochastic layer
         # And residual_blocks[-1] will have the top-most one, the output of which should be passed to last_gen_conv
-        self.residual_blocks = [BidirectionalResidualBlock(filters=self.filters,
+        self.residual_blocks = [BidirectionalResidualBlock(stochastic_filters=self.stochastic_filters,
+                                                           deterministic_filters=self.deterministic_filters,
                                                            kernel_size=self.kernel_size)
                                 for _ in range(self.num_res_blocks)]
 
@@ -264,7 +279,7 @@ class BidirectionalResNetVAE(tfk.Model):
         # Likelihood of the most recent sample
         self.log_likelihood = -np.inf
 
-    def call(self, tensor, binsize=1/256.):
+    def call(self, tensor, binsize=1 / 256.):
         original_tensor = tensor
 
         # Center tensor
@@ -303,13 +318,14 @@ class BidirectionalResNetVAE(tfk.Model):
         # Discretized Logistic Likelihood
         tensor = tf.clip_by_value(tensor, 1. / 512., 1. - 1. / 512.)
 
-        likelihood_scale = tf.math.exp(self.likelihood_log_scale)
+        likelihood_scale = tf.nn.softplus(self.likelihood_log_scale)
 
         # Discretize the output
         original_tensor = tf.math.floor(original_tensor / binsize) * binsize
         original_tensor = (original_tensor - tensor) / likelihood_scale
 
-        self.log_likelihood = tf.nn.sigmoid(original_tensor + binsize / likelihood_scale) - tf.nn.sigmoid(original_tensor)
+        self.log_likelihood = tf.nn.sigmoid(original_tensor + binsize / likelihood_scale) - tf.nn.sigmoid(
+            original_tensor)
         self.log_likelihood = tf.math.log(self.log_likelihood + 1e-7)
 
         return tensor
