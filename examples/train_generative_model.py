@@ -224,125 +224,110 @@ def train_resnet_vae(dataset,
     dataset = dataset.prefetch(num_prefetch)
 
     # -------------------------------------------------------------------------
-    # Create training strategy
+    # Create model
     # -------------------------------------------------------------------------
-    # strategy = tf.distribute.MirroredStrategy()
-    strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
+    model = BidirectionalResNetVAE(**model_config)
 
-    # Enter the scope of the strategy
-    with strategy.scope():
+    # -------------------------------------------------------------------------
+    # Create Optimizer
+    # -------------------------------------------------------------------------
+    learn_rate = tf.Variable(learning_rate)
+    optimizer = tf.optimizers.Adamax(learn_rate)
 
-        # Create distributed dataset
-        dist_dataset = strategy.experimental_distribute_dataset(dataset)
+    # Initialize the model weights
+    for first_pass in dataset.take(1):
+        model(first_pass)
 
-        # -------------------------------------------------------------------------
-        # Create model
-        # -------------------------------------------------------------------------
-        model = BidirectionalResNetVAE(**model_config)
+    # -------------------------------------------------------------------------
+    # Create Checkpoints
+    # -------------------------------------------------------------------------
+    ckpt = tf.train.Checkpoint(step=tf.Variable(1, dtype=tf.int64),
+                               learn_rate=learn_rate,
+                               model=model,
+                               optimizer=optimizer)
 
-        # -------------------------------------------------------------------------
-        # Create Optimizer
-        # -------------------------------------------------------------------------
-        learn_rate = tf.Variable(learning_rate)
-        optimizer = tf.optimizers.Adamax(learn_rate)
+    manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=3)
 
-        # Initialize the model weights
-        for first_pass in dataset.take(1):
-            model(first_pass)
+    # -------------------------------------------------------------------------
+    # Create Summary Writer
+    # -------------------------------------------------------------------------
+    summary_writer = tfs.create_file_writer(log_dir)
 
-        # -------------------------------------------------------------------------
-        # Create Checkpoints
-        # -------------------------------------------------------------------------
-        ckpt = tf.train.Checkpoint(step=tf.Variable(1, dtype=tf.int64),
-                                   learn_rate=learn_rate,
-                                   model=model,
-                                   optimizer=optimizer)
+    # -------------------------------------------------------------------------
+    # Training Loop
+    # -------------------------------------------------------------------------
 
-        manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=3)
+    # Restore previous session
+    ckpt.restore(manager.latest_checkpoint)
+    if manager.latest_checkpoint:
+        _log.info(f"Restored model from {manager.latest_checkpoint}")
+    else:
+        _log.info("Initializing model from scratch.")
 
-        # -------------------------------------------------------------------------
-        # Create Summary Writer
-        # -------------------------------------------------------------------------
-        summary_writer = tfs.create_file_writer(log_dir)
+    for batch in dataset.take(iters - int(ckpt.step)):
 
-        # -------------------------------------------------------------------------
-        # Define training step
-        # -------------------------------------------------------------------------
+        # Increment the training step
+        ckpt.step.assign_add(1)
 
-        # -------------------------------------------------------------------------
-        # Training Loop
-        # -------------------------------------------------------------------------
+        # Decrease learning rate after a while
+        if int(ckpt.step) == drop_learning_rate_after_iter:
+            learn_rate.assign(learning_rate_after_drop)
 
-        # Restore previous session
-        ckpt.restore(manager.latest_checkpoint)
-        if manager.latest_checkpoint:
-            _log.info(f"Restored model from {manager.latest_checkpoint}")
-        else:
-            _log.info("Initializing model from scratch.")
+        with tf.GradientTape() as tape:
 
-        for batch in dataset.take(iters - int(ckpt.step)):
+            reconstruction = model(batch, training=True)
 
-            # Increment the training step
-            ckpt.step.assign_add(1)
+            log_likelihood = model.log_likelihood
+            kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
 
-            # Decrease learning rate after a while
-            if int(ckpt.step) == drop_learning_rate_after_iter:
-                learn_rate.assign(learning_rate_after_drop)
+            # Linearly annealed beta
+            # beta = tf.minimum(beta, tf.cast(ckpt.step / annealing_end, tf.float32))
 
-            with tf.GradientTape() as tape:
+            loss = -log_likelihood + beta * kld
 
-                reconstruction = model(batch, training=True)
+        if tf.math.is_nan(loss) or tf.math.is_inf(loss):
+            raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
 
-                log_likelihood = model.log_likelihood
-                kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
+        gradients = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
-                # Linearly annealed beta
-                # beta = tf.minimum(beta, tf.cast(ckpt.step / annealing_end, tf.float32))
+        if int(ckpt.step) % tensorboard_log_freq == 1:
+            # Save model
+            save_path = manager.save()
+            _log.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
 
-                loss = -log_likelihood + beta * kld
+            log_2 = tf.math.log(2.)
 
-            if tf.math.is_nan(loss) or tf.math.is_inf(loss):
-                raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
+            true_kl = model.kl_divergence(empirical=True, minimum_kl=0.)
+            true_elbo = log_likelihood - kld
 
-            gradients = tape.gradient(loss, model.trainable_variables)
-            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+            with summary_writer.as_default():
+                tfs.scalar(name="Loss", data=loss, step=ckpt.step)
+                tfs.scalar(name="NLL", data=-log_likelihood, step=ckpt.step)
+                tfs.scalar(name="Total_KL_plus_Free_bits", data=kld, step=ckpt.step)
+                tfs.scalar(name="Total_True_KL", data=true_kl, step=ckpt.step)
+                tfs.scalar(name="Lossy_Bits_per_pixel",
+                           data=true_kl / (num_pixels * log_2),
+                           step=ckpt.step)
+                tfs.scalar(name="Lossy_Bits_per_pixel_and_channel",
+                           data=true_kl / (num_pixels * num_channels * log_2),
+                           step=ckpt.step)
+                tfs.scalar(name="Lossless_Bits_per_pixel",
+                           data=-true_elbo / (num_pixels * log_2),
+                           step=ckpt.step)
+                tfs.scalar(name="Lossless_Bits_per_pixel_and_channel",
+                           data=-true_elbo / (num_pixels * num_channels * log_2),
+                           step=ckpt.step)
+                tfs.scalar(name="Likelihood_Scale",
+                           data=tf.math.exp(model.likelihood_log_scale),
+                           step=ckpt.step)
 
-            if int(ckpt.step) % tensorboard_log_freq == 1:
-                # Save model
-                save_path = manager.save()
-                _log.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
+                tfs.image(name="Original", data=batch + 0.5, step=ckpt.step)
+                tfs.image(name="Reconstruction", data=reconstruction, step=ckpt.step)
 
-                log_2 = tf.math.log(2.)
+                for i, kl in enumerate(model.kl_divergence(empirical=True, minimum_kl=0., reduce=False)):
+                    tfs.scalar(name=f"KL/dim_{i + 1}", data=tf.squeeze(kl), step=ckpt.step)
 
-                true_kl = model.kl_divergence(empirical=True, minimum_kl=0.)
-                true_elbo = log_likelihood - kld
-
-                with summary_writer.as_default():
-                    tfs.scalar(name="Loss", data=loss, step=ckpt.step)
-                    tfs.scalar(name="NLL", data=-log_likelihood, step=ckpt.step)
-                    tfs.scalar(name="Total_KL_plus_Free_bits", data=kld, step=ckpt.step)
-                    tfs.scalar(name="Total_True_KL", data=true_kl, step=ckpt.step)
-                    tfs.scalar(name="Lossy_Bits_per_pixel",
-                               data=true_kl / (num_pixels * log_2),
-                               step=ckpt.step)
-                    tfs.scalar(name="Lossy_Bits_per_pixel_and_channel",
-                               data=true_kl / (num_pixels * num_channels * log_2),
-                               step=ckpt.step)
-                    tfs.scalar(name="Lossless_Bits_per_pixel",
-                               data=-true_elbo / (num_pixels * log_2),
-                               step=ckpt.step)
-                    tfs.scalar(name="Lossless_Bits_per_pixel_and_channel",
-                               data=-true_elbo / (num_pixels * num_channels * log_2),
-                               step=ckpt.step)
-                    tfs.scalar(name="Likelihood_Scale",
-                               data=tf.math.exp(model.likelihood_log_scale),
-                               step=ckpt.step)
-
-                    tfs.image(name="Original", data=batch + 0.5, step=ckpt.step)
-                    tfs.image(name="Reconstruction", data=reconstruction, step=ckpt.step)
-
-                    for i, kl in enumerate(model.kl_divergence(empirical=True, minimum_kl=0., reduce=False)):
-                        tfs.scalar(name=f"KL/dim_{i + 1}", data=tf.squeeze(kl), step=ckpt.step)
 
 @ex.automain
 def train_model(model, _log):
