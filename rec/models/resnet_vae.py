@@ -3,15 +3,18 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from .custom_modules.reparameterized_convolutions import ReparameterizedConv2D
-from .custom_modules.reparameterized_convolutions import ReparameterizedConv2DTranspose
+from .custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
 
-#ReparameterizedConv2D = tf.keras.layers.Conv2D
-#ReparameterizedConv2DTranspose = tf.keras.layers.Conv2DTranspose
+# ReparameterizedConv2D = tf.keras.layers.Conv2D
+# ReparameterizedConv2DTranspose = tf.keras.layers.Conv2DTranspose
 
 tfl = tf.keras.layers
 tfk = tf.keras
 tfd = tfp.distributions
+
+
+class ModelError(Exception):
+    pass
 
 
 class BidirectionalResidualBlock(tfl.Layer):
@@ -23,6 +26,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                  stochastic_filters,
                  deterministic_filters,
                  kernel_size=(3, 3),
+                 use_iaf=False,
                  is_last=False,
                  name="bidirectional_resnet_block",
                  **kwargs):
@@ -38,6 +42,9 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         # If the resnet block is the last one in the VAE, we won't use the final bit of the residual block.
         self.is_last = is_last
+
+        # Use inverse autoregressive flows as the posterior?
+        self.use_iaf = use_iaf
 
         # ---------------------------------------------------------------------
         # Declare layers
@@ -77,6 +84,11 @@ class BidirectionalResidualBlock(tfl.Layer):
         self.posterior = None
         self.prior = None
 
+        self.iaf_autoregressive_context = None
+        self.iaf_posterior_multiconv = None
+
+        self.empirical_kld = 0.
+
         # ---------------------------------------------------------------------
         # Initialization flag
         # ---------------------------------------------------------------------
@@ -92,10 +104,12 @@ class BidirectionalResidualBlock(tfl.Layer):
 
     def kl_divergence(self, empirical=False, minimum_kl=0.):
 
-        if empirical:
-            sample = self.posterior.sample()
-            kld = self.posterior.log_prob(sample) - self.prior.log_prob(sample)
+        if self.use_iaf and not empirical:
+            raise ModelError("KL divergence cannot be computed analytically when"
+                             "using IAFs as posterior!")
 
+        if empirical:
+            kld = self.empirical_kld
         else:
             kld = tfd.kl_divergence(self.posterior, self.prior)
 
@@ -172,6 +186,24 @@ class BidirectionalResidualBlock(tfl.Layer):
                                                                   strides=(1, 1),
                                                                   padding="same")
 
+        # ---------------------------------------------------------------------
+        # If we use IAF posteriors, we need some additional layers
+        # ---------------------------------------------------------------------
+        if self.use_iaf:
+            self.iaf_autoregressive_context = ReparameterizedConv2D(
+                filters=self.deterministic_filters,
+                kernel_size=self.kernel_size,
+                strides=(1, 1),
+                padding="same"
+            )
+
+            self.iaf_posterior_multiconv = AutoRegressiveMultiConv2D(
+                convolution_filters=[self.deterministic_filters,
+                                     self.deterministic_filters],
+                head_filters=[self.stochastic_filters,
+                              self.stochastic_filters]
+            )
+
         super().build(input_shape=input_shape)
 
     def call(self, tensor, latent_code=None, inference_pass=True, eps=1e-7):
@@ -236,6 +268,26 @@ class BidirectionalResidualBlock(tfl.Layer):
                     latent_code = self.prior.sample()
                     self._initialized.assign(True)
 
+                post_log_prob = self.posterior.log_prob(latent_code)
+                prior_log_prob = self.prior.log_prob(latent_code)
+
+                if self.use_iaf:
+                    context = self.iaf_autoregressive_context(tensor)
+
+                    iaf_mean, iaf_log_scale = self.iaf_posterior_multiconv(latent_code,
+                                                                           context=context)
+
+                    iaf_mean = 0.1 * iaf_mean
+                    iaf_log_scale = 0.1 * iaf_log_scale
+
+                    # Update latent code
+                    latent_code = (latent_code - iaf_mean) / tf.exp(iaf_log_scale)
+
+                    # Update posterior log probability with IAF's Jacobian logdet
+                    post_log_prob = post_log_prob + iaf_log_scale
+
+                self.empirical_kld = post_log_prob - prior_log_prob
+
             # Calculate next set of deterministic features for residual block
             tensor = self.gen_conv1(tensor)
 
@@ -269,6 +321,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  strides=(1, 1),
                  deterministic_filters=160,
                  stochastic_filters=32,
+                 use_iaf=False,
                  latent_size="variable",
                  name="resnet_vae",
                  **kwargs):
@@ -287,6 +340,8 @@ class BidirectionalResNetVAE(tfk.Model):
         self.strides = strides
         self.stochastic_filters = stochastic_filters
         self.deterministic_filters = deterministic_filters
+
+        self.use_iaf = use_iaf
 
         # ---------------------------------------------------------------------
         # Create parameters
@@ -313,6 +368,7 @@ class BidirectionalResNetVAE(tfk.Model):
                                                            deterministic_filters=self.deterministic_filters,
                                                            kernel_size=self.kernel_size,
                                                            is_last=res_block_idx == 0,  # Declare last residual block
+                                                           use_iaf=self.use_iaf,
                                                            name=f"resnet_block_{res_block_idx}")
                                 for res_block_idx in range(self.num_res_blocks)]
 
@@ -345,8 +401,6 @@ class BidirectionalResNetVAE(tfk.Model):
         # We go through the residual blocks in reverse topological order for the inference pass
         for res_block in self.residual_blocks[::-1]:
             tensor = res_block(tensor, latent_code=None, inference_pass=True)
-            # if tf.reduce_any(tf.math.is_nan(tensor)) or tf.reduce_any(tf.math.is_inf(tensor)):
-            #     raise Exception(f"Oh no in inference pass: {res_block.name}")
 
         # ---------------------------------------------------------------------
         # Perform Generative Pass
@@ -356,11 +410,6 @@ class BidirectionalResNetVAE(tfk.Model):
         # We go through the residual blocks in topological order for the generative pass
         for res_block in self.residual_blocks:
             tensor = res_block(tensor, latent_code=None, inference_pass=False)
-            # if tf.reduce_any(tf.math.is_nan(tensor)) or tf.reduce_any(tf.math.is_inf(tensor)):
-            #     #print(res_block.gen_conv2.bias)
-            #     #print(res_block.gen_conv2.kernel_log_scale)
-            #     #print(tf.nn.moments(res_block.gen_conv2.kernel_weights, [0, 1, 2]))
-            #     raise Exception(f"Oh no in gene pass: {res_block.name}")
 
         reconstruction = tf.nn.elu(tensor)
         reconstruction = self.last_gen_conv(reconstruction)
@@ -373,7 +422,6 @@ class BidirectionalResNetVAE(tfk.Model):
         # self.log_likelihood = self.likelihood_dist.log_prob(original_tensor)
 
         # Discretized Logistic Likelihood
-
         likelihood_scale = tf.math.exp(self.likelihood_log_scale)
 
         # Discretize the output
@@ -389,6 +437,10 @@ class BidirectionalResNetVAE(tfk.Model):
         return reconstruction + 0.5
 
     def kl_divergence(self, empirical=False, minimum_kl=0., reduce=True):
+
+        if self.use_iaf and not empirical:
+            raise ModelError("KL divergence cannot be computed analytically when"
+                             "using IAFs as posterior!")
 
         kls = [res_block.kl_divergence(empirical=empirical, minimum_kl=minimum_kl)
                for res_block in self.residual_blocks]

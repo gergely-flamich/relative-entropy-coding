@@ -15,6 +15,43 @@ from tensorflow.python.ops import nn
 from tensorflow.python.eager import context
 from tensorflow.python.keras import backend
 
+import numpy as np
+
+
+class CustomModuleError(Exception):
+    pass
+
+
+# Taken exactly from
+# https://github.com/hilloc-submission/hilloc/blob/b89e9c983e3764798e7c6f81f5cfc1d11b349d96/experiments/rvae/tf_utils/layers.py#L122
+def get_linear_ar_mask(n_in, n_out, zerodiagonal=False):
+    assert n_in % n_out == 0 or n_out % n_in == 0, "%d - %d" % (n_in, n_out)
+
+    mask = np.ones([n_in, n_out], dtype=np.float32)
+    if n_out >= n_in:
+        k = n_out // n_in
+        for i in range(n_in):
+            mask[i + 1:, i * k:(i + 1) * k] = 0
+            if zerodiagonal:
+                mask[i:i + 1, i * k:(i + 1) * k] = 0
+    else:
+        k = n_in // n_out
+        for i in range(n_out):
+            mask[(i + 1) * k:, i:i + 1] = 0
+            if zerodiagonal:
+                mask[i * k:(i + 1) * k:, i:i + 1] = 0
+    return mask
+
+
+def get_conv_ar_mask(h, w, n_in, n_out, zerodiagonal=False):
+    l = (h - 1) // 2
+    m = (w - 1) // 2
+    mask = np.ones([h, w, n_in, n_out], dtype=np.float32)
+    mask[:l, :, :, :] = 0
+    mask[l, :m, :, :] = 0
+    mask[l, m, :, :] = get_linear_ar_mask(n_in, n_out, zerodiagonal)
+    return mask
+
 
 class ReparameterizedConv(tf.keras.layers.Layer):
 
@@ -36,6 +73,7 @@ class ReparameterizedConv(tf.keras.layers.Layer):
                  bias_constraint=None,
                  trainable=True,
                  name=None,
+                 mask=None,
                  **kwargs):
         super().__init__(
             trainable=trainable,
@@ -61,8 +99,13 @@ class ReparameterizedConv(tf.keras.layers.Layer):
         self.bias_constraint = constraints.get(bias_constraint)
         self.input_spec = InputSpec(ndim=self.rank + 2)
 
+        self.mask_type = mask
+        self._mask = None
+
         # Initialization flag, because the first pass has to be calculated "using batch norm"
         self._initialized = tf.Variable(False, name="initialization_flag", trainable=False)
+
+        self.kernel_shape = None
 
         self.kernel_weights = None
         self.kernel_log_scale = None
@@ -71,10 +114,46 @@ class ReparameterizedConv(tf.keras.layers.Layer):
     def _get_kernel(self, norm_axes, initializing=False):
         v = tf.math.l2_normalize(self.kernel_weights, axis=norm_axes)
 
+        v = v * self.mask
+
         if not initializing:
             v = v * tf.exp(self.kernel_log_scale)
 
         return v
+
+    def _get_mask(self, axes_hwio):
+        """
+
+        :param axes_hwio: the axes in [height, width, input filters, output filters] order
+        :return:
+        """
+
+        kernel_shape = [self.kernel_weights.shape[i] for i in axes_hwio]
+
+        # invert the axis permutation
+        inv_perm = [0] * len(axes_hwio)
+
+        for i in range(len(axes_hwio)):
+            inv_perm[axes_hwio[i]] = i
+
+        if self.mask_type is None:
+            return tf.ones(self.kernel_weights.shape)
+
+        if self.mask_type == "a":
+            mask = tf.convert_to_tensor(get_conv_ar_mask(*kernel_shape, zerodiagonal=True))
+        elif self.mask_type == "b":
+            mask = tf.convert_to_tensor(get_conv_ar_mask(*kernel_shape, zerodiagonal=False))
+        else:
+            raise CustomModuleError(f"Unrecognized convolution mask: {self._mask}")
+
+        return tf.transpose(mask, perm=inv_perm)
+
+    @property
+    def mask(self):
+        if self._mask is None:
+            self._mask = self._get_mask([0, 1, 2, 3])
+
+        return self._mask
 
     @property
     def kernel(self):
@@ -295,6 +374,7 @@ class ReparameterizedConv2D(ReparameterizedConv):
                  activity_regularizer=None,
                  kernel_constraint=None,
                  bias_constraint=None,
+                 mask=None,
                  **kwargs):
         super().__init__(
             rank=2,
@@ -313,6 +393,7 @@ class ReparameterizedConv2D(ReparameterizedConv):
             activity_regularizer=regularizers.get(activity_regularizer),
             kernel_constraint=constraints.get(kernel_constraint),
             bias_constraint=constraints.get(bias_constraint),
+            mask=mask,
             **kwargs)
 
 
@@ -334,6 +415,7 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
                  activity_regularizer=None,
                  kernel_constraint=None,
                  bias_constraint=None,
+                 mask=None,
                  **kwargs):
         super().__init__(
             filters=filters,
@@ -367,6 +449,13 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
     def kernel(self):
         return self._get_kernel([0, 1, 3])
 
+    @property
+    def mask(self):
+        if self._mask is None:
+            self._mask = self._get_mask([0, 1, 3, 2])
+
+        return self._mask
+
     def build(self, input_shape):
         input_shape = tensor_shape.TensorShape(input_shape)
         if len(input_shape) != 4:
@@ -379,6 +468,8 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
         input_dim = int(input_shape[channel_axis])
         self.input_spec = InputSpec(ndim=4, axes={channel_axis: input_dim})
         kernel_shape = self.kernel_size + (self.filters, input_dim)
+
+        self.kernel_shape = kernel_shape
 
         self.kernel_weights = self.add_weight(
             name='kernel_weights',
@@ -539,3 +630,46 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
         config = super().get_config()
         config['output_padding'] = self.output_padding
         return config
+
+
+class AutoRegressiveMultiConv2D(tf.keras.layers.Layer):
+
+    def __init__(self,
+                 convolution_filters,
+                 head_filters,
+                 kernel_size=(3, 3),
+                 name="autoregressive_multi_convolution_2d",
+                 **kwargs):
+        super().__init__(name=name,
+                         **kwargs)
+
+        self.convolution_filters = convolution_filters
+        self.head_filters = head_filters
+        self.kernel_size = kernel_size
+
+        self.convolutions = [ReparameterizedConv2D(filters=filters,
+                                                   kernel_size=self.kernel_size,
+                                                   strides=(1, 1),
+                                                   padding="same",
+                                                   mask="b")
+                             for filters in self.convolution_filters]
+
+        self.heads = [ReparameterizedConv2D(filters=filters,
+                                            kernel_size=self.kernel_size,
+                                            strides=(1, 1),
+                                            padding="same",
+                                            mask="a")
+                      for filters in self.head_filters]
+
+    def call(self, tensor, context):
+
+        for i, conv in enumerate(self.convolutions):
+            tensor = conv(tensor)
+
+            if i == 0:
+                tensor = tensor + context
+
+            tensor = tf.nn.elu(tensor)
+
+        return [head(tensor) for head in self.heads]
+
