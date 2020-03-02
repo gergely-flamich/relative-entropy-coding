@@ -38,12 +38,12 @@ def default_config(dataset_info):
     elif model == "resnet_vae":
         model_config = {
             "latent_size": "variable",
-            "num_res_blocks": 20,
+            "num_res_blocks": 4,
             "deterministic_filters": 160,
             "stochastic_filters": 32,
         }
 
-        learning_rate = 1e-2
+        learning_rate = 3e-3
         lamb = 0.25
         beta = 1.
 
@@ -51,7 +51,7 @@ def default_config(dataset_info):
     iters = 3000000
 
     shuffle_buffer_size = 5000
-    batch_size = 64
+    batch_size = 16
     num_prefetch = 32
 
     # ELBO related stuff
@@ -213,6 +213,7 @@ def train_resnet_vae(dataset,
                      num_pixels,
                      num_channels,
                      _log):
+
     # -------------------------------------------------------------------------
     # Prepare the dataset
     # -------------------------------------------------------------------------
@@ -231,6 +232,13 @@ def train_resnet_vae(dataset,
     # -------------------------------------------------------------------------
     learn_rate = tf.Variable(learning_rate)
     optimizer = tf.optimizers.Adamax(learn_rate)
+
+    #ema = tf.train.ExponentialMovingAverage(decay=0.999)
+
+    # Initialize the model weights
+    for first_pass in dataset.take(1):
+        model(first_pass)
+        #ema.apply(model.trainable_variables)
 
     # -------------------------------------------------------------------------
     # Create Checkpoints
@@ -251,28 +259,12 @@ def train_resnet_vae(dataset,
     # Training Loop
     # -------------------------------------------------------------------------
 
-    # Initialize the model weights
-    for first_pass in dataset.take(1):
-        model(first_pass)
-
     # Restore previous session
     ckpt.restore(manager.latest_checkpoint)
     if manager.latest_checkpoint:
         _log.info(f"Restored model from {manager.latest_checkpoint}")
     else:
         _log.info("Initializing model from scratch.")
-
-    def elbo(log_probs, kls, beta, lamb):
-        ll = tf.reduce_sum(tf.reduce_mean(log_probs, axis=0))
-        mean_kls = [tf.reduce_sum(tf.reduce_mean(kl, axis=0)) for kl in kls]
-
-        mean_max_kls = [tf.maximum(lamb, kl) for kl in mean_kls]
-
-        total_mean_max_kl = tf.reduce_sum(mean_max_kls)
-
-        _elbo = ll - beta * total_mean_max_kl
-
-        return _elbo, ll, mean_max_kls
 
     for batch in dataset.take(iters - int(ckpt.step)):
 
@@ -288,42 +280,38 @@ def train_resnet_vae(dataset,
             reconstruction = model(batch, training=True)
 
             log_likelihood = model.log_likelihood
-            kls = model.kl_divergence(empirical=False)
+            kld = model.kl_divergence(empirical=False, minimum_kl=lamb)
 
             # Linearly annealed beta
             # beta = tf.minimum(beta, tf.cast(ckpt.step / annealing_end, tf.float32))
 
-            loss, ll, kl = elbo(log_likelihood, kls, beta=beta, lamb=lamb)
-            loss = -loss
-
-            total_kl = tf.reduce_sum(kl)
+            loss = -log_likelihood + beta * kld
 
         if tf.math.is_nan(loss) or tf.math.is_inf(loss):
-            raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-ll:.3f}, KL: {total_kl:.3f}")
+            raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
 
         gradients = tape.gradient(loss, model.trainable_variables)
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
-        if int(ckpt.step) % tensorboard_log_freq == 0:
+        if int(ckpt.step) % tensorboard_log_freq == 1:
             # Save model
             save_path = manager.save()
             _log.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
 
             log_2 = tf.math.log(2.)
 
-            true_elbo, _, _ = elbo(log_likelihood, kls, beta=1., lamb=0.)
-            _, _, true_kl = elbo(log_likelihood, kls, beta=beta, lamb=0.)
-            true_total_kl = tf.reduce_sum(true_kl)
+            true_kl = model.kl_divergence(empirical=False, minimum_kl=0.)
+            true_elbo = log_likelihood - kld
 
             with summary_writer.as_default():
                 tfs.scalar(name="Loss", data=loss, step=ckpt.step)
-                tfs.scalar(name="NLL", data=-ll, step=ckpt.step)
-                tfs.scalar(name="KL", data=total_kl, step=ckpt.step)
+                tfs.scalar(name="NLL", data=-log_likelihood, step=ckpt.step)
+                tfs.scalar(name="Total_KL", data=true_kl, step=ckpt.step)
                 tfs.scalar(name="Lossy_Bits_per_pixel",
-                           data=true_total_kl / (num_pixels * log_2),
+                           data=true_kl / (num_pixels * log_2),
                            step=ckpt.step)
                 tfs.scalar(name="Lossy_Bits_per_pixel_and_channel",
-                           data=true_total_kl / (num_pixels * num_channels * log_2),
+                           data=true_kl / (num_pixels * num_channels * log_2),
                            step=ckpt.step)
                 tfs.scalar(name="Lossless_Bits_per_pixel",
                            data=-true_elbo / (num_pixels * log_2),
@@ -335,11 +323,11 @@ def train_resnet_vae(dataset,
                            data=tf.math.exp(model.likelihood_log_scale),
                            step=ckpt.step)
 
-                tfs.image(name="Original", data=batch, step=ckpt.step)
+                tfs.image(name="Original", data=batch + 0.5, step=ckpt.step)
                 tfs.image(name="Reconstruction", data=reconstruction, step=ckpt.step)
 
-                for i in range(len(kls)):
-                    tfs.scalar(name=f"KL/dim_{i + 1}", data=tf.squeeze(kl[i]), step=ckpt.step)
+                for i, kl in enumerate(model.kl_divergence(empirical=False, minimum_kl=0., reduce=False)):
+                    tfs.scalar(name=f"KL/dim_{i + 1}", data=tf.squeeze(kl), step=ckpt.step)
 
 @ex.automain
 def train_model(model, _log):

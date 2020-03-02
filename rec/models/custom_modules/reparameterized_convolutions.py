@@ -64,35 +64,42 @@ class ReparameterizedConv(tf.keras.layers.Layer):
         # Initialization flag, because the first pass has to be calculated "using batch norm"
         self._initialized = tf.Variable(False, name="initialization_flag", trainable=False)
 
+        self.kernel_weights = None
+        self.kernel_log_scale = None
+        self.bias = None
+
+    def _get_kernel(self, norm_axes, initializing=False):
+        v = tf.math.l2_normalize(self.kernel_weights, axis=norm_axes)
+
+        if not initializing:
+            v = v * tf.exp(self.kernel_log_scale)
+
+        return v
+
     @property
     def kernel(self):
-        v = tf.math.l2_normalize(self.unit_kernel_weights, axis=[0, 1, 2])
-        return v * self.kernel_scale
-
-    # @property
-    # def bias(self):
-    #     return tf.linalg.normalize(self.unit_bias_weights)[0] * self.bias_scale
+        return self._get_kernel([0, 1, 2])
 
     def build(self, input_shape):
         input_shape = tensor_shape.TensorShape(input_shape)
         input_channel = self._get_input_channel(input_shape)
         kernel_shape = self.kernel_size + (input_channel, self.filters)
 
-        self.unit_kernel_weights = self.add_weight(
-            name='unit_kernel_weights',
+        self.kernel_weights = self.add_weight(
+            name='kernel_weights',
             shape=kernel_shape,
             initializer=tf.random_normal_initializer(mean=0.0, stddev=0.05),
             regularizer=self.kernel_regularizer,
             constraint=self.kernel_constraint,
             trainable=True,
             dtype=self.dtype)
-        self.kernel_scale = self.add_weight(name='kernel_scale',
-                                            shape=(1, 1, 1, self.filters),
-                                            initializer=tf.constant_initializer(value=1.),
-                                            regularizer=None,
-                                            constraint=None,
-                                            trainable=True,
-                                            dtype=self.dtype)
+        self.kernel_log_scale = self.add_weight(name='kernel_log_scale',
+                                                shape=(1, 1, 1, self.filters),
+                                                initializer=tf.constant_initializer(value=0.),
+                                                regularizer=None,
+                                                constraint=None,
+                                                trainable=True,
+                                                dtype=self.dtype)
         if self.use_bias:
             self.bias = self.add_weight(
                 name='bias',
@@ -102,26 +109,8 @@ class ReparameterizedConv(tf.keras.layers.Layer):
                 constraint=self.bias_constraint,
                 trainable=True,
                 dtype=self.dtype)
-            # self.unit_bias_weights = self.add_weight(
-            #     name='unit_bias_weights',
-            #     shape=(self.filters,),
-            #     initializer=self.bias_initializer,
-            #     regularizer=self.bias_regularizer,
-            #     constraint=self.bias_constraint,
-            #     trainable=True,
-            #     dtype=self.dtype)
-            # self.bias_scale = self.add_weight(
-            #     name='bias_scale',
-            #     shape=(),
-            #     initializer=tf.constant_initializer(value=1.),
-            #     regularizer=self.bias_regularizer,
-            #     constraint=self.bias_constraint,
-            #     trainable=True,
-            #     dtype=self.dtype)
         else:
             self.bias = None
-            # self.unit_bias_bias = None
-            # self.bias_scale = None
 
         channel_axis = self._get_channel_axis()
         self.input_spec = InputSpec(ndim=self.rank + 2,
@@ -141,7 +130,7 @@ class ReparameterizedConv(tf.keras.layers.Layer):
             data_format=self._conv_op_data_format)
         self.built = True
 
-    def call(self, inputs):
+    def call(self, inputs, init_scale=0.1):
         # Check if the input_shape in call() is different from that in build().
         # If they are different, recreate the _convolution_op to avoid the stateful
         # behavior.
@@ -162,27 +151,35 @@ class ReparameterizedConv(tf.keras.layers.Layer):
         if self.padding == 'causal' and self.__class__.__name__ == 'Conv1D':
             inputs = array_ops.pad(inputs, self._compute_causal_padding())
 
-        outputs = self._convolution_op(inputs, self.kernel)
-
         # ---------------------------------------------------------------------
         # Check if the convolution has been initialized. If it has not,
         # perform "batch norm" and initialize the kernel scale and the bias
         # ---------------------------------------------------------------------
         if not self._initialized:
-            # The kernel scale is initialized to 1, so wx = v/||v|| * x
+            # Disables using the scale parameter, so we only use v / ||v||
+            kernel = self._get_kernel(norm_axes=[0, 1, 2], initializing=True)
+            outputs = self._convolution_op(inputs, kernel)
+
+            # Moments are calculated along batch, width and height dimensions
             out_mean, out_var = tf.nn.moments(outputs, axes=[0, 1, 2], keepdims=True)
 
-            out_std = tf.maximum(tf.math.sqrt(out_var), 1e-7)
+            scale_init = init_scale / tf.sqrt(out_var + 1e-10)
 
             # Batch norm
-            outputs = (outputs - out_mean) / out_std
+            outputs = (outputs - out_mean) * scale_init
 
             # Initialize the kernel scale and the bias
-            self.kernel_scale.assign(1. / out_std)
-            self.bias.assign(tf.reshape(-out_mean / out_std, [self.filters]))
+            self.kernel_log_scale.assign(tf.math.log(scale_init) / 3.0)
+
+            if self.use_bias:
+                self.bias.assign(tf.reshape(-out_mean * scale_init, [self.filters]))
 
             self._initialized.assign(True)
 
+        else:
+            outputs = self._convolution_op(inputs, self.kernel)
+
+        # If the convolution is not initialized yet, we shouldn't add on the bias
         if self.use_bias:
             if self.data_format == 'channels_first':
                 if self.rank == 1:
@@ -366,6 +363,10 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
                                                                      'greater than output padding ' +
                                      str(self.output_padding))
 
+    @property
+    def kernel(self):
+        return self._get_kernel([0, 1, 3])
+
     def build(self, input_shape):
         input_shape = tensor_shape.TensorShape(input_shape)
         if len(input_shape) != 4:
@@ -379,21 +380,21 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
         self.input_spec = InputSpec(ndim=4, axes={channel_axis: input_dim})
         kernel_shape = self.kernel_size + (self.filters, input_dim)
 
-        self.unit_kernel_weights = self.add_weight(
-            name='unit_kernel_weights',
+        self.kernel_weights = self.add_weight(
+            name='kernel_weights',
             shape=kernel_shape,
             initializer=tf.random_normal_initializer(mean=0.0, stddev=0.05),
             regularizer=self.kernel_regularizer,
             constraint=self.kernel_constraint,
             trainable=True,
             dtype=self.dtype)
-        self.kernel_scale = self.add_weight(name='kernel_scale',
-                                            shape=(1, 1, self.filters, 1),
-                                            initializer=tf.constant_initializer(value=1.),
-                                            regularizer=None,
-                                            constraint=None,
-                                            trainable=True,
-                                            dtype=self.dtype)
+        self.kernel_log_scale = self.add_weight(name='kernel_log_scale',
+                                                shape=(1, 1, self.filters, 1),
+                                                initializer=tf.constant_initializer(value=0.),
+                                                regularizer=None,
+                                                constraint=None,
+                                                trainable=True,
+                                                dtype=self.dtype)
         if self.use_bias:
             self.bias = self.add_weight(
                 name='bias',
@@ -406,7 +407,7 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
 
         self.built = True
 
-    def call(self, inputs):
+    def call(self, inputs, init_scale=0.1):
         inputs_shape = array_ops.shape(inputs)
         batch_size = inputs_shape[0]
         if self.data_format == 'channels_first':
@@ -442,39 +443,54 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
             output_shape = (batch_size, out_height, out_width, self.filters)
 
         output_shape_tensor = array_ops.stack(output_shape)
-        outputs = backend.conv2d_transpose(
-            inputs,
-            self.kernel,
-            output_shape_tensor,
-            strides=self.strides,
-            padding=self.padding,
-            data_format=self.data_format,
-            dilation_rate=self.dilation_rate)
-
-        if not context.executing_eagerly():
-            # Infer the static output shape:
-            out_shape = self.compute_output_shape(inputs.shape)
-            outputs.set_shape(out_shape)
 
         # ---------------------------------------------------------------------
         # Check if the convolution has been initialized. If it has not,
         # perform "batch norm" and initialize the kernel scale and the bias
         # ---------------------------------------------------------------------
         if not self._initialized:
-            # The kernel scale is initialized to 1, so wx = v/||v|| * x
+            # Do not use the kernel log scale for the initialization round
+            # Remember that the filter axis for deconvolutions is the 3rd one not the 4th
+            # Note: the original IAF implementation is consciously using a bugged implementation, where
+            # the norm is taken over the axes [0, 1, 2], but apparently this causes training instability
+            # https://github.com/openai/iaf/issues/7
+            # https://github.com/openai/iaf/blob/ad33fe4872bf6e4b4f387e709a625376bb8b0d9d/tf_utils/layers.py#L93
+            kernel = self._get_kernel(norm_axes=[0, 1, 3], initializing=True)
+            outputs = backend.conv2d_transpose(inputs,
+                                               kernel,
+                                               output_shape_tensor,
+                                               strides=self.strides,
+                                               padding=self.padding,
+                                               data_format=self.data_format,
+                                               dilation_rate=self.dilation_rate)
+
             out_mean, out_var = tf.nn.moments(outputs, axes=[0, 1, 2], keepdims=True)
 
-            out_std = tf.maximum(tf.math.sqrt(out_var), 1e-7)
+            init_scale = init_scale / tf.sqrt(out_var + 1e-10)
 
             # Batch norm
-            outputs = (outputs - out_mean) / out_std
+            normed_outputs = (outputs - out_mean) * init_scale
 
             # Initialize the kernel scale and the bias
-            self.kernel_scale.assign(tf.transpose(1. / out_std, perm=[0, 1, 3, 2]))
-            self.bias.assign(tf.reshape(-out_mean / out_std, [self.filters]))
+            self.kernel_log_scale.assign(tf.transpose(tf.math.log(init_scale) / 3.0, perm=[0, 1, 3, 2]))
+
+            if self.use_bias:
+                self.bias.assign(tf.reshape(-out_mean * init_scale, [self.filters]))
 
             self._initialized.assign(True)
 
+            return normed_outputs
+
+        else:
+            outputs = backend.conv2d_transpose(inputs,
+                                               self.kernel,
+                                               output_shape_tensor,
+                                               strides=self.strides,
+                                               padding=self.padding,
+                                               data_format=self.data_format,
+                                               dilation_rate=self.dilation_rate)
+
+        # If the convolution has not been initialized yet, we shouldn't add on the bias
         if self.use_bias:
             outputs = nn.bias_add(
                 outputs,
@@ -483,6 +499,7 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
 
         if self.activation is not None:
             return self.activation(outputs)
+
         return outputs
 
     def compute_output_shape(self, input_shape):
