@@ -84,8 +84,12 @@ class BidirectionalResidualBlock(tfl.Layer):
         self.posterior = None
         self.prior = None
 
-        self.iaf_autoregressive_context = None
+        self.infer_iaf_autoregressive_context_conv = None
+        self.gen_iaf_autoregressive_context_conv = None
         self.iaf_posterior_multiconv = None
+
+        self.infer_iaf_autoregressive_context = None
+        self.gen_iaf_autoregressive_context = None
 
         self.empirical_kld = 0.
 
@@ -101,6 +105,13 @@ class BidirectionalResidualBlock(tfl.Layer):
     @property
     def posterior_scale(self):
         return tf.exp(self.infer_posterior_log_scale + self.gen_posterior_log_scale)
+
+    @property
+    def iaf_autoregressive_context(self):
+        if not self.use_iaf:
+            raise ModelError("IAF contexts only exist when model is in IAF mode!")
+
+        return self.infer_iaf_autoregressive_context + self.gen_iaf_autoregressive_context
 
     def kl_divergence(self, empirical=False, minimum_kl=0.):
 
@@ -190,7 +201,14 @@ class BidirectionalResidualBlock(tfl.Layer):
         # If we use IAF posteriors, we need some additional layers
         # ---------------------------------------------------------------------
         if self.use_iaf:
-            self.iaf_autoregressive_context = ReparameterizedConv2D(
+            self.infer_iaf_autoregressive_context_conv = ReparameterizedConv2D(
+                filters=self.deterministic_filters,
+                kernel_size=self.kernel_size,
+                strides=(1, 1),
+                padding="same"
+            )
+
+            self.gen_iaf_autoregressive_context_conv = ReparameterizedConv2D(
                 filters=self.deterministic_filters,
                 kernel_size=self.kernel_size,
                 strides=(1, 1),
@@ -233,6 +251,9 @@ class BidirectionalResidualBlock(tfl.Layer):
             self.infer_posterior_loc = self.infer_posterior_loc_head(tensor)
             self.infer_posterior_log_scale = self.infer_posterior_log_scale_head(tensor)
 
+            if self.use_iaf:
+                self.infer_iaf_autoregressive_context = self.infer_iaf_autoregressive_context_conv(tensor)
+
             # Calculate next set of deterministic feautres
             if not self.is_last:
                 tensor = self.infer_conv1(tensor)
@@ -269,10 +290,11 @@ class BidirectionalResidualBlock(tfl.Layer):
                     self._initialized.assign(True)
 
                 post_log_prob = self.posterior.log_prob(latent_code)
-                prior_log_prob = self.prior.log_prob(latent_code)
 
                 if self.use_iaf:
-                    context = self.iaf_autoregressive_context(tensor)
+                    self.gen_iaf_autoregressive_context = self.gen_iaf_autoregressive_context_conv(tensor)
+
+                    context = self.iaf_autoregressive_context
 
                     iaf_mean, iaf_log_scale = self.iaf_posterior_multiconv(latent_code,
                                                                            context=context)
@@ -285,6 +307,10 @@ class BidirectionalResidualBlock(tfl.Layer):
 
                     # Update posterior log probability with IAF's Jacobian logdet
                     post_log_prob = post_log_prob + iaf_log_scale
+
+                # Note: prior log probability needs to be calculated once we passed the latent
+                # code through the IAF, since we care about the transformed sample!
+                prior_log_prob = self.prior.log_prob(latent_code)
 
                 self.empirical_kld = post_log_prob - prior_log_prob
 
