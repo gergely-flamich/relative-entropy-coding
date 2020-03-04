@@ -36,15 +36,19 @@ def default_config(dataset_info):
         beta = 1.
 
     elif model == "resnet_vae":
+
+        use_iaf = False
+        num_res_blocks = 4
+
         model_config = {
-            "use_iaf": True,
+            "use_iaf": use_iaf,
             "latent_size": "variable",
-            "num_res_blocks": 4,
+            "num_res_blocks": num_res_blocks,
             "deterministic_filters": 160,
             "stochastic_filters": 32,
         }
 
-        learning_rate = 3e-3
+        learning_rate = 1e-3
         lamb = 0.1
         beta = 1.
 
