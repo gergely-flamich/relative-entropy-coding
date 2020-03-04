@@ -127,7 +127,7 @@ class BidirectionalResidualBlock(tfl.Layer):
         # The parameters are shared per channel, so we first calculate the average
         # across the batch, width and height axes, then apply the minimum KL constraint,
         # and finally sum across the filters
-        kld = tf.reduce_sum(tf.reduce_sum(kld, axis=[1, 2]), axis=[0])
+        kld = tf.reduce_mean(tf.reduce_sum(kld, axis=[1, 2]), axis=[0])
 
         kld = tf.maximum(kld, minimum_kl)
 

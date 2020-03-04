@@ -45,14 +45,14 @@ def default_config(dataset_info):
         }
 
         learning_rate = 3e-3
-        lamb = 0.25
+        lamb = 0.1
         beta = 1.
 
     # Training-time configurations
     iters = 3000000
 
-    shuffle_buffer_size = 5000
-    batch_size = 16
+    shuffle_buffer_size = 10000
+    batch_size = 32
     num_prefetch = 32
 
     # ELBO related stuff

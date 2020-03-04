@@ -50,6 +50,15 @@ def load_dataset(tfds_name, dataset_path, split, normalize, num_pixels, num_chan
 
     normalizer = 256. if normalize else 1.
 
-    ds = ds.map(lambda x: tf.clip_by_value((tf.cast(x["image"], tf.float32) + 0.5) / normalizer, 0.0, 1.0) - 0.5)
+    def prepare(image):
+        image = tf.cast(image["image"], tf.float32)
+
+        image = (image + 0.5) / normalizer
+
+        image = tf.clip_by_value(image, 0., 1.) - 0.5
+
+        return image
+
+    ds = ds.map(prepare)
 
     return ds, num_pixels, num_channels
