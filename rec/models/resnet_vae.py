@@ -5,9 +5,6 @@ import tensorflow_probability as tfp
 
 from .custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
 
-# ReparameterizedConv2D = tf.keras.layers.Conv2D
-# ReparameterizedConv2DTranspose = tf.keras.layers.Conv2DTranspose
-
 tfl = tf.keras.layers
 tfk = tf.keras
 tfd = tfp.distributions
