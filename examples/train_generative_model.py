@@ -18,6 +18,15 @@ tfd = tfp.distributions
 ex = Experiment('train_generative_model', ingredients=[data_ingredient])
 
 
+def print_dict(d):
+    items = []
+
+    for k, v in d.items():
+        items.append(f"{k}-" + (f"{v:.4f}" if type(v) == float else f"{v}"))
+
+    return '.'.join(items)
+
+
 @ex.config
 def default_config(dataset_info):
 
@@ -27,13 +36,18 @@ def default_config(dataset_info):
     model = "vae"
 
     if model == "vae":
+        latent_size = 50
+
         model_config = {
-            "latent_size": 50
+            "latent_size": latent_size
         }
 
         learning_rate = 3e-4
         lamb = 0.
         beta = 1.
+
+        model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
+                         f"latents_{latent_size}_beta_{beta:.3f}_lamb_{lamb:.3f}"
 
     elif model == "resnet_vae":
 
@@ -52,6 +66,10 @@ def default_config(dataset_info):
         lamb = 0.1
         beta = 1.
 
+        model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
+                         f"/{'iaf' if use_iaf else 'gaussian'}/blocks_{num_res_blocks}/" \
+                         f"beta_{beta:.3f}_lamb_{lamb:.3f}"
+
     # Training-time configurations
     iters = 3000000
 
@@ -68,8 +86,7 @@ def default_config(dataset_info):
     # Logging
     tensorboard_log_freq = 1000
 
-    model_save_dir = f"{model_save_base_dir}/{dataset_info['tfds_name']}/{model}/" \
-                     f"latents_{model_config['latent_size']}_beta_{beta:.3f}_lamb_{lamb:.3f}"
+
 
     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_dir = f"{model_save_dir}/logs/{current_time}/train"

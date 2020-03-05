@@ -9,35 +9,52 @@ data_ingredient = Ingredient('dataset_info')
 
 @data_ingredient.config
 def data_config():
-    tfds_name = "mnist"
-    dataset_path = "/scratch/gf332/datasets/mnist"
+    dataset_name = "mnist"
+
+    dataset_base_path = "/scratch/gf332/datasets/"
+
+    if dataset_name == "mnist":
+        tfds_name = "mnist"
+        dataset_path = f"{dataset_base_path}/mnist"
+
+        normalize = False
+        num_pixels = 28 * 28
+        num_channels = 1
+
+    elif dataset_name == "binarized_mnist":
+        tfds_name = "binarized_mnist"
+        dataset_path = f"{dataset_base_path}/binarized_mnist"
+
+        normalize = False
+        num_pixels = 28 * 28
+        num_channels = 1
+
+    elif dataset_name == "cifar10":
+        tfds_name = "cifar10"
+        dataset_path = f"{dataset_base_path}/cifar10"
+
+        normalize = True
+        num_pixels = 32 * 32
+        num_channels = 3
+
+    elif dataset_name == "imagenet32":
+        tfds_name = "downsampled_imagenet/32x32"
+        dataset_path = f"{dataset_base_path}/imagenet32"
+
+        normalize = True
+        num_pixels = 32 * 32
+        num_channels = 3
+
+    elif dataset_name == "imagenet64":
+        tfds_name = "downsampled_imagenet/64x64"
+        dataset_path = f"{dataset_base_path}/imagenet64"
+
+        normalize = True
+        num_pixels = 64 * 64
+        num_channels = 3
 
     # Can be 'train' or 'test'
     split = "train"
-
-    num_pixels = 28 * 28
-    num_channels = 1
-
-    normalize = True
-
-
-@data_ingredient.named_config
-def binarized_mnist():
-    tfds_name = "binarized_mnist"
-    dataset_path = "/scratch/gf332/datasets/mnist"
-
-    normalize = False
-
-
-@data_ingredient.named_config
-def cifar_10():
-    tfds_name = "cifar10"
-    dataset_path = "/scratch/gf332/datasets/cifar10"
-
-    num_pixels = 32 * 32
-    num_channels = 3
-
-    normalize = True
 
 
 @data_ingredient.capture

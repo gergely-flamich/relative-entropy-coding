@@ -330,6 +330,16 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         return tensor
 
+    def posterior_log_prob(self, tensor):
+        if self.use_iaf:
+            raise NotImplementedError
+
+        else:
+            return tf.reduce_sum(self.posterior.log_prob(tensor))
+
+    def prior_log_prob(self, tensor):
+        return tf.reduce_sum(self.prior.log_prob(tensor))
+
 
 class BidirectionalResNetVAE(tfk.Model):
     """
@@ -475,3 +485,34 @@ class BidirectionalResNetVAE(tfk.Model):
             return tf.reduce_sum(kls)
         else:
             return kls
+
+    # =========================================================================
+    # Compression
+    # =========================================================================
+
+    def compress(self, image, coding_mechanism, lossless=True):
+
+        tensor = image
+
+        # We first calculate the inference statistics of the image.
+        # Note that the ResNet blocks are ordered according to the order of a generative pass,
+        # so we iterate the list in reverse
+        for resnet_block in self.residual_blocks[::-1]:
+            tensor = resnet_block(tensor, latent_code=None, inference_pass=True)
+
+        # Once the inference pass is complete, we code each of the blocks sequentially
+        tensor = self.generative_base()
+
+        for resnet_block in self.residual_blocks:
+            latent_code, compressed_code = coding_mechanism(tensor)
+
+            tensor = resnet_block(tensor, latent_code=latent_code, inference_pass=False)
+
+    def decompress(self, compressed_codes, decoding_mechanism, lossless=True):
+
+        tensor = self.generative_base()
+
+        # We sequentially decode through the resnet blocks
+        for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
+            latent_code = decoding_mechanism(compressed_code)
+            tensor = resnet_block(tensor, latent_code=latent_code, inference_pass=False)
