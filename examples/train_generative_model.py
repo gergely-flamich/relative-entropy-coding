@@ -312,6 +312,9 @@ def train_resnet_vae(dataset,
         gradients = tape.gradient(loss, model.trainable_variables)
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
+        # Once the model parameters are updated, we also update their exponential moving average.
+        model.update_ema_variables()
+
         if int(ckpt.step) % tensorboard_log_freq == 1:
             # Save model
             save_path = manager.save()

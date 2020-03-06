@@ -356,6 +356,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  stochastic_filters=32,
                  use_iaf=False,
                  latent_size="variable",
+                 ema_decay=0.999,
                  name="resnet_vae",
                  **kwargs):
         super().__init__(name=name,
@@ -375,6 +376,9 @@ class BidirectionalResNetVAE(tfk.Model):
         self.deterministic_filters = deterministic_filters
 
         self.use_iaf = use_iaf
+
+        # Decay for exponential moving average update to variables
+        self.ema_decay = tf.cast(ema_decay, tf.float32)
 
         # ---------------------------------------------------------------------
         # Create parameters
@@ -415,6 +419,11 @@ class BidirectionalResNetVAE(tfk.Model):
         # Referred to as "h_top" in both the Kingma and Townsend implementations
         self._generative_base = tf.Variable(tf.zeros(self.deterministic_filters),
                                             name="generative_base")
+
+        # ---------------------------------------------------------------------
+        # EMA shadow variables
+        # ---------------------------------------------------------------------
+        self._ema_shadow_variables = {}
 
     def generative_base(self, batch_size, height, width):
 
@@ -467,6 +476,10 @@ class BidirectionalResNetVAE(tfk.Model):
         self.log_likelihood = tf.math.log(self.log_likelihood + 1e-7)
         self.log_likelihood = tf.reduce_mean(tf.reduce_sum(self.log_likelihood, [1, 2, 3]))
 
+        # If it's the initialization round, create our EMA shadow variables
+        if not self.is_ema_variables_initialized:
+            self.create_ema_variables()
+
         return reconstruction + 0.5
 
     def kl_divergence(self, empirical=False, minimum_kl=0., reduce=True):
@@ -482,6 +495,54 @@ class BidirectionalResNetVAE(tfk.Model):
             return tf.reduce_sum(kls)
         else:
             return kls
+
+    @property
+    def is_ema_variables_initialized(self):
+        return len(self._ema_shadow_variables) > 0
+
+    def create_ema_variables(self):
+        """
+        Creates a shadow copy of every trainable variable. These shadow variables are updated at every training
+        iteration using an exponential moving average rule. The EMA variables can then be swapped in for the
+        real values at evaluation time, as they supposedly give better performance.
+        :return:
+        """
+
+        # If the EMA variables have been created already, just skip
+        if self.is_ema_variables_initialized:
+            return
+
+        self._ema_shadow_variables = {v.name: tf.Variable(v,
+                                                          name=f"{v.name}/exponential_moving_average",
+                                                          trainable=False)
+                                      for v in self.trainable_variables}
+
+    def update_ema_variables(self):
+        """
+        Update the EMA variables with the latest value of all the current trainable variables.
+
+        This implementation is based on tf.compat.v1.train.ExponentialMovingAverage:
+        https://github.com/tensorflow/tensorflow/blob/e5bf8de410005de06a7ff5393fafdf832ef1d4ad/tensorflow/python/training/moving_averages.py#L35
+        :return:
+        """
+        if not self.is_ema_variables_initialized:
+            raise ModelError("EMA variables haven't been created yet, since the model has not been initialized yet!")
+
+        for v in self.trainable_variables:
+            ema_var = self._ema_shadow_variables[v.name]
+            ema_var.assign_sub((1.0 - self.ema_decay) * (ema_var - v))
+
+    def swap_in_ema_variables(self):
+        """
+        Swap in the EMA shadow variables in place of the real ones for evaluation.
+        NOTE: Once the EMA variables have been swapped in, there is no way of swapping back!
+        :return:
+        """
+        if not self.is_ema_variables_initialized:
+            raise ModelError("EMA variables haven't been created yet, since the model has not been initialized yet!")
+
+        for v in self.trainable_variables:
+            v.assign(self._ema_shadow_variables[v.name])
 
     # =========================================================================
     # Compression

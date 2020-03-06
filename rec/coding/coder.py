@@ -59,6 +59,9 @@ class GaussianEncoder(Encoder):
 
         self.sampler = sampler
 
+    def get_auxiliary_distribution(self, aux_):
+        pass
+
     def get_partitions(self, kl_per_partition):
         return []
 
