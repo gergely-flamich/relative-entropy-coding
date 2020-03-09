@@ -34,11 +34,15 @@ def encode_gaussian_importance_sample(t_loc,
     # Fix seed
     tf.random.set_seed(seed)
 
+    # Standardize the target w.r.t the coding distribution
+    t_loc = (t_loc - p_loc) / p_scale
+    t_scale = t_scale / p_scale
+
     target = tfd.Normal(loc=t_loc,
                         scale=t_scale)
 
-    proposal = tfd.Normal(loc=p_loc,
-                          scale=p_scale)
+    proposal = tfd.Normal(loc=tf.zeros_like(p_loc),
+                          scale=tf.ones_like(p_scale))
 
     # Get the total KL divergence
     kl = tf.reduce_sum(tfd.kl_divergence(target, proposal))
@@ -69,6 +73,25 @@ def encode_gaussian_importance_sample(t_loc,
     return chosen_sample, index
 
 
-def decode_gaussian_importance_sample(p_loc, p_scale)
+def decode_gaussian_importance_sample(p_loc, p_scale, index, seed):
+    """
+    Decodes a sample encoded using a Gaussian distribution
+    :param p_loc:
+    :param p_scale:
+    :param index:
+    :param seed:
+    :return:
+    """
+
+    # Fix seed
+    tf.random.set_seed(seed)
+
+    proposal = tfd.Normal(loc=tf.zeros_like(p_loc),
+                          scale=tf.ones_like(p_scale))
+
+    samples = proposal.sample(tf.cast(index, tf.int64))
+
+    return samples[-1]
+
 
 
