@@ -86,8 +86,6 @@ def default_config(dataset_info):
     # Logging
     tensorboard_log_freq = 1000
 
-
-
     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_dir = f"{model_save_dir}/logs/{current_time}/train"
 
@@ -355,7 +353,7 @@ def train_resnet_vae(dataset,
 
 @ex.automain
 def train_model(model, _log):
-    dataset, num_pixels, num_channels = load_dataset()
+    dataset, num_pixels, num_channels, _ = load_dataset()
 
     if model == "vae":
         _log.info("Training a regular VAE!")
