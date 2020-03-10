@@ -2,6 +2,7 @@ import numpy as np
 
 import tensorflow as tf
 import tensorflow_probability as tfp
+from matplotlib import pyplot as plt
 
 from utils import CodingError
 
@@ -22,14 +23,16 @@ def get_t_p_mass(t, p):
     return tf.gather(log_ratios, reduced_ind), tf.gather(t_mass, reduced_ind), tf.gather(p_mass, reduced_ind)
 
 
-def get_R_pstar(log_ratios, t_mass, p_mass, buffer_size):
+def get_R_pstar(log_ratios, t_mass, p_mass, buffer_size, R=0., pstar=0.):
+    t_mass = tf.cast(t_mass, dtype=tf.float64)
+    p_mass = tf.cast(p_mass, dtype=tf.float64)
     ratios_np = tf.exp(log_ratios).numpy()
     t_cummass_np = tf.exp(tf.math.cumulative_logsumexp(t_mass)).numpy()
     p_cummass_np = tf.exp(tf.math.cumulative_logsumexp(p_mass)).numpy()
     p_zero = float(1. - np.exp(tf.reduce_logsumexp(p_mass)))
     pstar_buffer = tf.Variable(tf.zeros((buffer_size, )), trainable=False)
     R_buffer = tf.Variable(tf.zeros((buffer_size, )), trainable=False)
-    R = 1.
+    R += 1. - pstar
     R_buffer[0].assign(R)
     i = 1
     for R_ind, R_next in enumerate(ratios_np):
@@ -48,6 +51,8 @@ def get_R_pstar(log_ratios, t_mass, p_mass, buffer_size):
         if i == buffer_size:
             pstar_buffer[buffer_size - 1].assign((1. - p_cum) * R + t_cum)
             break
+        if R_ind == ratios_np.shape[0] - 1:
+            print('Problem big time!')
     return R_buffer, pstar_buffer
 
 
@@ -76,33 +81,27 @@ def get_R_pstar_baseline(log_ratios, t_mass, p_mass, buffer_size):
 
 def gaussian_rejection_sample_small(t_dist,
                                     p_dist,
-                                    buffer_size,
+                                    sample_buffer_size,
+                                    R_buffer_size,
                                     seed=42069):
-    log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist)
-    R_buffer, pstar_buffer = get_R_pstar(log_ratios, t_mass, p_mass, buffer_size=buffer_size)
+    assert(R_buffer_size % sample_buffer_size == 0)
     print('Rejection sampling with KL={}'.format(tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))))
-    samples = p_dist.sample((buffer_size,), seed=seed)
-    n_axes = len(samples.shape)
-    sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
-    accepted = (tf.exp(sample_ratios) - R_buffer) / (1. - pstar_buffer) + tf.random.uniform(shape=R_buffer.shape)
-    accepted_ind = tf.where(accepted > 0.)
-    if accepted_ind.shape[0] > 0:
-        index = accepted_ind[0, 0]
-        return index, samples[index]
-    else:
-        # If not finished in buffer, we accept anything above ratio R
-        buffer_used = buffer_size
-        R = R_buffer[-1]
-        while True:
-            print('Buffer refill')
-            samples = p_dist.sample((buffer_size,), seed=seed)
+    i = 0
+    while True:
+        log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist)
+        R_buffer, pstar_buffer = get_R_pstar(log_ratios, t_mass, p_mass, buffer_size=R_buffer_size)
+        j = 0
+        for _ in range(int(R_buffer_size // sample_buffer_size)):
+            samples = p_dist.sample((sample_buffer_size,), seed=seed)
+            n_axes = len(samples.shape)
             sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
-            accepted_ind = tf.where(sample_ratios > tf.math.log(R))
+            accepted = (tf.exp(sample_ratios) - R_buffer[j:j+sample_buffer_size]) / (1. - pstar_buffer[j:j+sample_buffer_size]) + tf.random.uniform(shape=sample_ratios.shape)
+            accepted_ind = tf.where(accepted > 0.)
             if accepted_ind.shape[0] > 0:
-                index = accepted_ind[0, 0]
-                return buffer_used + index, samples[index]
-            else:
-                buffer_used += buffer_size
+                index = int(accepted_ind[0, 0])
+                return i + index, samples[index]
+            j += sample_buffer_size
+            i += sample_buffer_size
 
 
 def get_aux_distribution(t, p, aux_var):
@@ -131,17 +130,17 @@ def preprocessing_auxiliary_ratios(t_list, p_list, target_kl):
     for t, p in zip(t_list, p_list):
         n_aux = 1 + int(tf.reduce_sum(tfp.distributions.kl_divergence(t, p)) // target_kl)
         ratio_list = []
+        aux_ratio_untransformed = tf.Variable(-2., trainable=True)
         for i in range(n_aux, 1, -1):
             kl = tf.reduce_sum(tfp.distributions.kl_divergence(t, p))
-            aux_ratio_untransformed = tf.Variable(-2., trainable=True)
-            opt = tf.optimizers.SGD(learning_rate=0.01)
+            opt = tf.optimizers.SGD(learning_rate=0.001)
             def get_loss():
                 aux_ratio = tf.math.sigmoid(aux_ratio_untransformed)
                 aux_var = aux_ratio * tf.math.pow(p.scale, 2)
                 ta, pa = get_aux_distribution(t, p, aux_var)
                 aux_kl = tf.reduce_sum(tfp.distributions.kl_divergence(ta, pa))
                 return tf.math.pow(aux_kl - kl / i, 2)
-            for _ in range(150):
+            for _ in range(50 if i < n_aux else 500):
                 opt.minimize(get_loss, var_list=[aux_ratio_untransformed])
 
             aux_ratio = tf.math.sigmoid(aux_ratio_untransformed)
@@ -159,9 +158,12 @@ def preprocessing_auxiliary_ratios(t_list, p_list, target_kl):
     for l in image_ratio_list:
         average_ratios[:len(l)] += l
         denominator[:len(l)] += 1
+        plt.plot(l, c='b')
+    average_ratios /= denominator
+    plt.plot(average_ratios, c='r')
+    plt.show()
 
-    return average_ratios / denominator
-
+    return average_ratios
 
 
 
@@ -169,19 +171,21 @@ def gaussian_rejection_sample_large(t_dist,
                                     p_dist,
                                     target_kl,
                                     auxiliary_ratios,
-                                    buffer_size,
+                                    sample_buffer_size,
+                                    R_buffer_size,
                                     seed=42069):
     kl = tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))
     n_aux = 1 + int(kl // target_kl)
     indicies = []
     for aux_ratio in auxiliary_ratios[:n_aux - 1][::-1]:
-        print(aux_ratio)
+        print('KL={}, aux_ratio={}'.format(tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist)), aux_ratio))
         aux_var = aux_ratio * tf.math.pow(p_dist.scale, 2)
         ta, pa = get_aux_distribution(t_dist, p_dist, aux_var)
-        index, sample = gaussian_rejection_sample_small(ta, pa, buffer_size, seed)
+        index, sample = gaussian_rejection_sample_small(ta, pa, sample_buffer_size, R_buffer_size, seed)
+        print('Sample found at {}'.format(index))
         indicies.append(index)
         t_dist, p_dist = get_conditionals(t_dist, p_dist, aux_var, sample)
-    index, sample = gaussian_rejection_sample_small(t_dist, p_dist, buffer_size, seed)
+    index, sample = gaussian_rejection_sample_small(t_dist, p_dist, sample_buffer_size, R_buffer_size, seed)
     indicies.append(index)
     return sample, indicies
 

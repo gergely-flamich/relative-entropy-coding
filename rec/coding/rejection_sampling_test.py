@@ -25,19 +25,22 @@ mnist_path = '/scratch/mh740/mnist_posteriors/beta_1_latents_50/test/img_{}/'
 
 t_list = []
 p_list = []
-for i in range(10):
-    t, p = get_t_p_gauss(filename=mnist_path.format(i), dims=200)
+for i in range(20):
+    t, p = get_t_p_gauss(filename=mnist_path.format(i), dims=500)
     t_list.append(t)
     p_list.append(p)
 
 target_kl = 10.
 # aux_ratios = np.array([0.68339353, 0.54674925, 0.46513237, 0.4246385,  0.39013079, 0.37761325])
-aux_ratios = preprocessing_auxiliary_ratios(t_list, p_list, target_kl)
-
+# aux_ratios = preprocessing_auxiliary_ratios(t_list, p_list, target_kl)
+# np.savetxt('aux_ratios.txt', aux_ratios)
+aux_ratios = np.loadtxt('aux_ratios.txt')
 print(aux_ratios)
 # plt.plot(aux_ratios)
 # plt.show()
 
 
-t, p = get_t_p_gauss(filename=mnist_path.format(222), dims=200)
-print(gaussian_rejection_sample_large(t, p, target_kl, aux_ratios, 1000000))
+t, p = get_t_p_gauss(filename=mnist_path.format(333), dims=500)
+
+
+print(gaussian_rejection_sample_large(t, p, target_kl, aux_ratios, 10000, 1000000))
