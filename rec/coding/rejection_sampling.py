@@ -9,8 +9,8 @@ from utils import CodingError
 tfd = tfp.distributions
 
 def get_t_p_mass(t, p):
-    n_samples = 1000
-    oversampling = 100
+    n_samples = 100
+    oversampling = 1000
     y = t.sample((n_samples * oversampling,))
 
     t_mass = -np.log(n_samples) + tf.zeros((n_samples * oversampling,))
@@ -23,16 +23,16 @@ def get_t_p_mass(t, p):
     return tf.gather(log_ratios, reduced_ind), tf.gather(t_mass, reduced_ind), tf.gather(p_mass, reduced_ind)
 
 
-def get_R_pstar(log_ratios, t_mass, p_mass, buffer_size, R=0., pstar=0.):
+def get_R_pstar(log_ratios, t_mass, p_mass, buffer_size, dtype=tf.float32):
     t_mass = tf.cast(t_mass, dtype=tf.float64)
     p_mass = tf.cast(p_mass, dtype=tf.float64)
     ratios_np = tf.exp(log_ratios).numpy()
     t_cummass_np = tf.exp(tf.math.cumulative_logsumexp(t_mass)).numpy()
     p_cummass_np = tf.exp(tf.math.cumulative_logsumexp(p_mass)).numpy()
     p_zero = float(1. - np.exp(tf.reduce_logsumexp(p_mass)))
-    pstar_buffer = tf.Variable(tf.zeros((buffer_size, )), trainable=False)
-    R_buffer = tf.Variable(tf.zeros((buffer_size, )), trainable=False)
-    R += 1. - pstar
+    pstar_buffer = tf.Variable(tf.zeros((buffer_size, ), dtype=dtype), trainable=False)
+    R_buffer = tf.Variable(tf.zeros((buffer_size, ), dtype=dtype), trainable=False)
+    R = 1.
     R_buffer[0].assign(R)
     i = 1
     for R_ind, R_next in enumerate(ratios_np):
@@ -43,7 +43,7 @@ def get_R_pstar(log_ratios, t_mass, p_mass, buffer_size, R=0., pstar=0.):
         interval = min(buffer_size - i, 1 + int(np.log((R_next - (1. - t_cum) / (1. - p_cum)) / (R - (1. - t_cum) / (1. - p_cum))) // np.log(p_cum)))
 
         # Work in log for numerical stability
-        R_slice = -tf.exp(np.log(p_cum) * (1. + tf.range(interval, dtype=tf.float32)) + np.log((1. - t_cum) / (1. - p_cum) - R)) + (1. - t_cum) / (1. - p_cum)
+        R_slice = -tf.exp(np.log(p_cum) * (1. + tf.range(interval, dtype=dtype)) + np.log((1. - t_cum) / (1. - p_cum) - R)) + (1. - t_cum) / (1. - p_cum)
         R_buffer[i:i+interval].assign(R_slice)
         pstar_buffer[i-1:i+interval-1].assign((1. - p_cum) * R_buffer[i-1:i+interval-1] + t_cum)
         R = np.power(p_cum, interval) * (R - (1. - t_cum) / (1. - p_cum)) + (1. - t_cum) / (1. - p_cum)
@@ -53,6 +53,8 @@ def get_R_pstar(log_ratios, t_mass, p_mass, buffer_size, R=0., pstar=0.):
             break
         if R_ind == ratios_np.shape[0] - 1:
             print('Problem big time!')
+            print(interval)
+            # TODO make sure this never happens
     return R_buffer, pstar_buffer
 
 
@@ -85,22 +87,30 @@ def gaussian_rejection_sample_small(t_dist,
                                     R_buffer_size,
                                     seed=42069):
     assert(R_buffer_size % sample_buffer_size == 0)
+    log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist)
+    R_buffer, pstar_buffer = get_R_pstar(log_ratios, t_mass, p_mass, buffer_size=R_buffer_size)
     print('Rejection sampling with KL={}'.format(tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))))
     i = 0
+    for _ in range(int(R_buffer_size // sample_buffer_size)):
+        samples = p_dist.sample((sample_buffer_size,), seed=seed)
+        n_axes = len(samples.shape)
+        sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
+        accepted = (tf.exp(sample_ratios) - R_buffer[i:i+sample_buffer_size]) / (1. - pstar_buffer[i:i+sample_buffer_size]) + tf.random.uniform(shape=sample_ratios.shape)
+        accepted_ind = tf.where(accepted > 0.)
+        if accepted_ind.shape[0] > 0:
+            index = int(accepted_ind[0, 0])
+            return i + index, samples[index]
+        i += sample_buffer_size
+    # If not finished in buffer, we accept anything above ratio R
+    R = R_buffer[-1]
     while True:
-        log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist)
-        R_buffer, pstar_buffer = get_R_pstar(log_ratios, t_mass, p_mass, buffer_size=R_buffer_size)
-        j = 0
-        for _ in range(int(R_buffer_size // sample_buffer_size)):
-            samples = p_dist.sample((sample_buffer_size,), seed=seed)
-            n_axes = len(samples.shape)
-            sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
-            accepted = (tf.exp(sample_ratios) - R_buffer[j:j+sample_buffer_size]) / (1. - pstar_buffer[j:j+sample_buffer_size]) + tf.random.uniform(shape=sample_ratios.shape)
-            accepted_ind = tf.where(accepted > 0.)
-            if accepted_ind.shape[0] > 0:
-                index = int(accepted_ind[0, 0])
-                return i + index, samples[index]
-            j += sample_buffer_size
+        samples = p_dist.sample((sample_buffer_size,), seed=seed)
+        sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
+        accepted_ind = tf.where(sample_ratios > tf.math.log(R))
+        if accepted_ind.shape[0] > 0:
+            index = int(accepted_ind[0, 0])
+            return i + index, samples[index]
+        else:
             i += sample_buffer_size
 
 
@@ -164,6 +174,18 @@ def preprocessing_auxiliary_ratios(t_list, p_list, target_kl):
     plt.show()
 
     return average_ratios
+
+
+def preprocessing_probs(t_list, p_list, buffer_size):
+    probs = []
+    for t, p in zip(t_list, p_list):
+        log_ratios, t_mass, p_mass = get_t_p_mass(t, p)
+        _, pstar_buffer = get_R_pstar(log_ratios, t_mass, p_mass, buffer_size=buffer_size, dtype=tf.float64)
+        probs.append(pstar_buffer - tf.concat((tf.constant([0.], dtype=tf.float64), pstar_buffer[:-1]), axis=0))
+    probs = sum(probs) / len(t_list)
+    leftover = 1. - tf.sum(probs)
+
+    pass    
 
 
 

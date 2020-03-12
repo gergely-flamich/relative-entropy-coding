@@ -40,7 +40,8 @@ print(aux_ratios)
 # plt.show()
 
 
-t, p = get_t_p_gauss(filename=mnist_path.format(333), dims=500)
+t, p = get_t_p_gauss(filename=mnist_path.format(333), dims=30)
+preprocessing_probs([t], [p], buffer_size=10000000)
 
 
-print(gaussian_rejection_sample_large(t, p, target_kl, aux_ratios, 10000, 1000000))
+print(gaussian_rejection_sample_large(t, p, target_kl, aux_ratios, 10000, 10000000))
