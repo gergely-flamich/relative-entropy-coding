@@ -4,7 +4,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from matplotlib import pyplot as plt
 
-from utils import CodingError
+from .utils import CodingError
 
 tfd = tfp.distributions
 

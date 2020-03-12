@@ -22,7 +22,7 @@ class Sampler(tf.Module, abc.ABC):
     def coded_sample(self,
                      target: tfd.Distribution,
                      coder: tfd.Distribution,
-                     seed: tf.int64) -> Tuple[tf.int64, tf.Tensor]:
+                     seed: tf.int64) -> Tuple[int, tf.Tensor]:
         """
         Takes two target distributions and a seed and performs a coded sampling procedure.
 
@@ -58,7 +58,7 @@ class ImportanceSampler(Sampler):
     def coded_sample(self,
                      target: tfd.Distribution,
                      coder: tfd.Distribution,
-                     seed: tf.int64) -> Tuple[tf.int64, tf.Tensor]:
+                     seed: tf.int64) -> Tuple[int, tf.Tensor]:
         return encode_gaussian_importance_sample(t_loc=target.loc,
                                                  t_scale=target.scale,
                                                  p_loc=coder.loc,
@@ -88,7 +88,7 @@ class RejectionSampler(Sampler):
     def coded_sample(self,
                      target: tfd.Distribution,
                      coder: tfd.Distribution,
-                     seed: tf.int64) -> Tuple[tf.int64, tf.Tensor]:
+                     seed: tf.int64) -> Tuple[int, tf.Tensor]:
 
         return gaussian_rejection_sample_small(t_dist=target,
                                                p_dist=coder,

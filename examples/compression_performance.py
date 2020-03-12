@@ -136,7 +136,7 @@ def test_resnet_vae(model_config,
     # -------------------------------------------------------------------------
     for images in dataset:
         block_indices, reconstruction = model.compress(images, seed=42)
-    
+
 
 @ex.automain
 def compress_data(model, _log):

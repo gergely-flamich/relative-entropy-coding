@@ -9,4 +9,4 @@ class CodingError(Exception):
 
 def stateless_gumbel_sample(shape, seed):
 
-    return -tf.math.log(-tf.math.log(tf.random.stateless_normal(shape, seed)))
+    return -tf.math.log(-tf.math.log(tf.random.stateless_normal(shape, [seed, seed + 1])))
