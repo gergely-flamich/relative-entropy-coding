@@ -251,8 +251,8 @@ class GaussianDecoder(Decoder):
     def __init__(self,
                  coding_dist,
                  auxiliary_variable_variance_ratios,
-                 sampler,
-                 name,
+                 sampler="importance",
+                 name="gaussian_decoder",
                  **kwargs):
         super().__init__(name=name,
                          coding_dist=coding_dist,

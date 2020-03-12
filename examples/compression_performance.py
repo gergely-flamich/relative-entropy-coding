@@ -28,6 +28,8 @@ def default_config(dataset_info):
 
     train_dataset = "mnist"
 
+    kl_per_partition = 10.0
+
     if model == "vae":
         latent_size = 50
 
@@ -72,6 +74,7 @@ def test_resnet_vae(model_config,
                     model_save_dir,
                     num_test_images,
                     dataset,
+                    kl_per_partition,
                     test_dataset_name,
                     num_pixels,
                     num_channels,
@@ -122,6 +125,18 @@ def test_resnet_vae(model_config,
 
     print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
 
+    # -------------------------------------------------------------------------
+    # Set-up for compression
+    # -------------------------------------------------------------------------
+    for images in dataset:
+        model.initialize_coders(images, kl_per_partition=kl_per_partition)
+
+    # -------------------------------------------------------------------------
+    # Compress images
+    # -------------------------------------------------------------------------
+    for images in dataset:
+        block_indices, reconstruction = model.compress(images, seed=42)
+    
 
 @ex.automain
 def compress_data(model, _log):

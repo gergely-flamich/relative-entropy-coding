@@ -230,7 +230,7 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         super().build(input_shape=input_shape)
 
-    def call(self, tensor, inference_pass=True, eps=1e-7):
+    def call(self, tensor, inference_pass=True, encoder_args=None, decoder_args=None, eps=1e-7):
         """
 
         :param tensor: data to be passed through the residual block
@@ -239,9 +239,6 @@ class BidirectionalResidualBlock(tfl.Layer):
         :param inference_pass:
         :return:
         """
-
-        if latent_code is not None:
-            assert latent_code.shape == tensor.shape
 
         input = tensor
 
@@ -279,8 +276,12 @@ class BidirectionalResidualBlock(tfl.Layer):
             self.prior = tfd.Normal(loc=self.prior_loc,
                                     scale=self.prior_scale)
 
+            # -----------------------------------------------------------------
+            # Training
+            # -----------------------------------------------------------------
+
             # If no latent code is provided, we need to create it
-            if latent_code is None:
+            if encoder_args is None or decoder_args is None:
                 # Calculate second part of posterior statistics
                 self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
@@ -320,6 +321,27 @@ class BidirectionalResidualBlock(tfl.Layer):
 
                 self.empirical_kld = post_log_prob - prior_log_prob
 
+            # -----------------------------------------------------------------
+            # Compression
+            # -----------------------------------------------------------------
+            if encoder_args is not None:
+
+                # Calculate second part of posterior statistics
+                self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
+                self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
+
+                # The loc and scale are automagically calculated using property methods
+                self.posterior = tfd.Normal(loc=self.posterior_loc,
+                                            scale=self.posterior_scale)
+
+                indices, latent_code = self.encoder(**encoder_args)
+
+            # -----------------------------------------------------------------
+            # Decompression
+            # -----------------------------------------------------------------
+            if decoder_args is not None:
+                latent_code = self.decoder(**decoder_args)
+
             # Calculate next set of deterministic features for residual block
             tensor = self.gen_conv1(tensor)
 
@@ -334,7 +356,20 @@ class BidirectionalResidualBlock(tfl.Layer):
         # https://github.com/hilloc-submission/hilloc/blob/b89e9c983e3764798e7c6f81f5cfc1d11b349d96/experiments/rvae/model/__init__.py#L116
         tensor = input + 0.1 * tensor
 
+        if encoder_args is not None:
+            return indices, tensor
+
         return tensor
+
+    def initialize_coders(self, kl_per_partition=10.0):
+        self.encoder = GaussianEncoder(target_dist=self.posterior,
+                                       coding_dist=self.prior,
+                                       kl_per_partition=kl_per_partition)
+
+        self.encoder.initialize()
+
+        self.decoder = GaussianDecoder(coding_dist=self.prior,
+                                       auxiliary_variable_variance_ratios=self.encoder.aux_variable_variance_ratios)
 
     def posterior_log_prob(self, tensor):
         if self.use_iaf:
@@ -522,7 +557,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
         # We go through the residual blocks in reverse topological order for the inference pass
         for res_block in self.residual_blocks[::-1]:
-            tensor = res_block(tensor, latent_code=None, inference_pass=True)
+            tensor = res_block(tensor, inference_pass=True)
 
         # ---------------------------------------------------------------------
         # Perform Generative Pass
@@ -531,7 +566,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
         # We go through the residual blocks in topological order for the generative pass
         for res_block in self.residual_blocks:
-            tensor = res_block(tensor, latent_code=None, inference_pass=False)
+            tensor = res_block(tensor, inference_pass=False)
 
         reconstruction = tf.nn.elu(tensor)
         reconstruction = self.last_gen_conv(reconstruction)
@@ -619,29 +654,52 @@ class BidirectionalResNetVAE(tfk.Model):
     # Compression
     # =========================================================================
 
-    def compress(self, image, coding_mechanism, lossless=True):
+    def initialize_coders(self, images, kl_per_partition=10.0):
+        # To initialize the coders, we first perform a forward pass with the supplied images.
+        # This will set the posteriors and priors in the resicdual blocks
+        self.call(images)
+
+        for res_block in self.residual_blocks:
+            res_block.initialize_coders(kl_per_partition=kl_per_partition)
+
+    def compress(self, image, seed, lossless=True):
 
         tensor = image
+
+        tensor = self.first_infer_conv(tensor)
 
         # We first calculate the inference statistics of the image.
         # Note that the ResNet blocks are ordered according to the order of a generative pass,
         # so we iterate the list in reverse
         for resnet_block in self.residual_blocks[::-1]:
-            tensor = resnet_block(tensor, latent_code=None, inference_pass=True)
+            tensor = resnet_block(tensor, inference_pass=True,)
 
         # Once the inference pass is complete, we code each of the blocks sequentially
         tensor = self.generative_base()
 
+        block_indices = []
         for resnet_block in self.residual_blocks:
-            latent_code, compressed_code = coding_mechanism(tensor)
+            indices, tensor = resnet_block(tensor, inference_pass=False, encoder_args={"seed": seed})
 
-            tensor = resnet_block(tensor, latent_code=latent_code, inference_pass=False)
+            block_indices.append(indices)
 
-    def decompress(self, compressed_codes, decoding_mechanism, lossless=True):
+        reconstruction = tf.nn.elu(tensor)
+        reconstruction = self.last_gen_conv(reconstruction)
+        reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
+
+        return block_indices, reconstruction
+
+    def decompress(self, compressed_codes, seed, lossless=True):
 
         tensor = self.generative_base()
 
         # We sequentially decode through the resnet blocks
         for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
-            latent_code = decoding_mechanism(compressed_code)
-            tensor = resnet_block(tensor, latent_code=latent_code, inference_pass=False)
+            tensor = resnet_block(tensor, inference_pass=False, decoder_args={"seed": seed,
+                                                                              "indices": compressed_codes})
+
+        reconstruction = tf.nn.elu(tensor)
+        reconstruction = self.last_gen_conv(reconstruction)
+        reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
+
+        return reconstruction + 0.5
