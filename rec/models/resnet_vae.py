@@ -1,9 +1,12 @@
+from typing import Tuple
+
 import numpy as np
 
 import tensorflow as tf
 import tensorflow_probability as tfp
 
 from .custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
+from rec.coding import Encoder, Decoder, GaussianEncoder, GaussianDecoder
 
 tfl = tf.keras.layers
 tfk = tf.keras
@@ -20,12 +23,12 @@ class BidirectionalResidualBlock(tfl.Layer):
     """
 
     def __init__(self,
-                 stochastic_filters,
-                 deterministic_filters,
-                 kernel_size=(3, 3),
-                 use_iaf=False,
-                 is_last=False,
-                 name="bidirectional_resnet_block",
+                 stochastic_filters: int,
+                 deterministic_filters: int,
+                 kernel_size: Tuple[int, int] =(3, 3),
+                 use_iaf: bool = False,
+                 is_last: bool = False,
+                 name: str ="bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
@@ -89,6 +92,12 @@ class BidirectionalResidualBlock(tfl.Layer):
         self.gen_iaf_autoregressive_context = None
 
         self.empirical_kld = 0.
+
+        # ---------------------------------------------------------------------
+        # Stuff for compression
+        # ---------------------------------------------------------------------
+        self.encoder = None
+        self.decoder = None
 
         # ---------------------------------------------------------------------
         # Initialization flag
@@ -221,7 +230,7 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         super().build(input_shape=input_shape)
 
-    def call(self, tensor, latent_code=None, inference_pass=True, eps=1e-7):
+    def call(self, tensor, inference_pass=True, eps=1e-7):
         """
 
         :param tensor: data to be passed through the residual block
@@ -346,8 +355,17 @@ class BidirectionalResNetVAE(tfk.Model):
     In Advances in Neural Information ProcessingSystems (NIPS), 2016.
     """
 
+    AVAILABLE_LIKELIHOODS = [
+        "discretized_logistic",
+        "gaussian",
+        "laplace",
+        "ms-ssim"
+    ]
+
     def __init__(self,
                  num_res_blocks,
+                 likelihood_function="discretized_logistic",
+                 learn_likelihood_scale=True,
                  first_kernel_size=(5, 5),
                  first_strides=(2, 2),
                  kernel_size=(3, 3),
@@ -367,6 +385,14 @@ class BidirectionalResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         self.num_res_blocks = num_res_blocks
 
+        self.learn_likelihood_scale = learn_likelihood_scale
+
+        if likelihood_function not in self.AVAILABLE_LIKELIHOODS:
+            raise ModelError(f"Likelihood function must be one of: {self.AVAILABLE_LIKELIHOODS}! "
+                             f"({likelihood_function} was given).")
+
+        self._likelihood_function = likelihood_function
+
         self.first_kernel_size = first_kernel_size
         self.first_strides = first_strides
 
@@ -383,7 +409,9 @@ class BidirectionalResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         # Create parameters
         # ---------------------------------------------------------------------
-        self.likelihood_log_scale = tf.Variable(0., name="likelihood_log_scale")
+        self.likelihood_log_scale = tf.Variable(0.,
+                                                name="likelihood_log_scale",
+                                                trainable=self.learn_likelihood_scale)
 
         # ---------------------------------------------------------------------
         # Create ResNet Layers
@@ -431,6 +459,58 @@ class BidirectionalResNetVAE(tfk.Model):
 
         return tf.tile(base, [batch_size, height // 2, width // 2, 1])
 
+    @property
+    def likelihood_function(self):
+
+        likelihood_scale = tf.math.exp(self.likelihood_log_scale)
+
+        def discretized_logistic(reference, reconstruction, binsize=1./256.):
+
+            # Discretize the output
+            discretized_input = tf.math.floor(reference / binsize) * binsize
+            discretized_input = (discretized_input - reconstruction) / likelihood_scale
+
+            log_likelihood = tf.nn.sigmoid(discretized_input + binsize / likelihood_scale)
+            log_likelihood = log_likelihood - tf.nn.sigmoid(discretized_input)
+
+            log_likelihood = tf.math.log(log_likelihood + 1e-7)
+            return tf.reduce_sum(log_likelihood, [1, 2, 3])
+
+        def gaussian_log_prob(reference, reconstruction):
+            likelihood = tfd.Normal(loc=reconstruction, scale=likelihood_scale)
+            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+
+        def laplace_log_prob(reference, reconstruction):
+            likelihood = tfd.Laplace(loc=reconstruction, scale=likelihood_scale)
+
+            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+
+        # TODO
+        def discretized_laplace_log_prob(reference, reconstruction, binsize=1./256.):
+
+            # Discretize the output
+            discretized_input = tf.math.floor(reference / binsize) * binsize
+
+        def ms_ssim_pseudo_log_prob(reference, reconstruction):
+            return 1. / likelihood_scale * tf.image.ssim_multiscale(reference / likelihood_scale,
+                                                                    reconstruction / likelihood_scale,
+                                                                    max_val=1.0)
+
+        if self._likelihood_function == "discretized_logistic":
+            return discretized_logistic
+
+        elif self._likelihood_function == "gaussian":
+            return gaussian_log_prob
+
+        elif self._likelihood_function == "laplace":
+            return laplace_log_prob
+
+        elif self._likelihood_function == "ms-ssim":
+            return ms_ssim_pseudo_log_prob
+
+        else:
+            raise NotImplementedError
+
     def call(self, tensor, binsize=1 / 256.0):
         input = tensor
         batch_size, height, width, _ = input.shape
@@ -464,17 +544,8 @@ class BidirectionalResNetVAE(tfk.Model):
         # self.log_likelihood = self.likelihood_dist.log_prob(original_tensor)
 
         # Discretized Logistic Likelihood
-        likelihood_scale = tf.math.exp(self.likelihood_log_scale)
-
-        # Discretize the output
-        discretized_input = tf.math.floor(input / binsize) * binsize
-        discretized_input = (discretized_input - reconstruction) / likelihood_scale
-
-        self.log_likelihood = tf.nn.sigmoid(discretized_input + binsize / likelihood_scale)
-        self.log_likelihood = self.log_likelihood - tf.nn.sigmoid(discretized_input)
-
-        self.log_likelihood = tf.math.log(self.log_likelihood + 1e-7)
-        self.log_likelihood = tf.reduce_mean(tf.reduce_sum(self.log_likelihood, [1, 2, 3]))
+        log_likelihood = self.likelihood_function(input, reconstruction)
+        self.log_likelihood = tf.reduce_mean(log_likelihood)
 
         # If it's the initialization round, create our EMA shadow variables
         if not self.is_ema_variables_initialized:

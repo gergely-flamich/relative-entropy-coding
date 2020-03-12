@@ -19,21 +19,21 @@ def get_t_p_gauss(filename, dims=1000):
     return t, p
 
 # tf.debugging.set_log_device_placement(True)
-mnist_path = '/scratch/mh740/mnist_posteriors/beta_1_latents_50/test/img_{}/'
+mnist_path = '/scratch/gf332/CWOQ/relative-entropy-coding/experimental_data/data_distributions/mnist/beta_1_latents_50/test/img_{}/'
 #
 # print(encode_gaussian_rejection_sample(t, p, buffer_size=1000000))
 
 t_list = []
 p_list = []
-for i in range(20):
+for i in range(2):
     t, p = get_t_p_gauss(filename=mnist_path.format(i), dims=500)
     t_list.append(t)
     p_list.append(p)
 
 target_kl = 10.
 # aux_ratios = np.array([0.68339353, 0.54674925, 0.46513237, 0.4246385,  0.39013079, 0.37761325])
-# aux_ratios = preprocessing_auxiliary_ratios(t_list, p_list, target_kl)
-# np.savetxt('aux_ratios.txt', aux_ratios)
+aux_ratios = preprocessing_auxiliary_ratios(t_list, p_list, target_kl)
+np.savetxt('aux_ratios.txt', aux_ratios)
 aux_ratios = np.loadtxt('aux_ratios.txt')
 print(aux_ratios)
 # plt.plot(aux_ratios)

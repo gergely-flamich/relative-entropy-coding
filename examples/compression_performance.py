@@ -19,7 +19,7 @@ ex = Experiment("compression_performance", ingredients=[data_ingredient])
 @ex.config
 def default_config(dataset_info):
 
-    num_test_images = 300
+    num_test_images = 1
 
     # Model configurations
     model_save_base_dir = "/scratch/gf332/models/relative-entropy-coding"
@@ -115,11 +115,12 @@ def test_resnet_vae(model_config,
     if test_dataset_name == "clic2019":
         num_pixels = images.shape[1] * images.shape[2]
 
-    neg_elbo = -model.log_likelihood + model.kl_divergence(empirical=True, minimum_kl=0.)
+    kld = model.kl_divergence(empirical=True, minimum_kl=0.)
+    neg_elbo = -model.log_likelihood + kld
     bpp = neg_elbo / (num_pixels * np.log(2))
     bpd = bpp / num_channels
 
-    print(f"Negative ELBO: {neg_elbo:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
+    print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
 
 
 @ex.automain

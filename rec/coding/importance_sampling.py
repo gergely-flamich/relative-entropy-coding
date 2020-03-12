@@ -70,7 +70,7 @@ def encode_gaussian_importance_sample(t_loc,
 
     chosen_sample = samples[index, ...]
 
-    return chosen_sample, index
+    return index, chosen_sample
 
 
 def decode_gaussian_importance_sample(p_loc, p_scale, index, seed):
