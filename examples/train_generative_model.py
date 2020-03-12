@@ -53,6 +53,8 @@ def default_config(dataset_info):
 
         use_iaf = False
         num_res_blocks = 4
+        likelihood_function = "discretized_logistic"
+        learn_likelihood_scale = True
 
         model_config = {
             "use_iaf": use_iaf,
@@ -60,6 +62,8 @@ def default_config(dataset_info):
             "num_res_blocks": num_res_blocks,
             "deterministic_filters": 160,
             "stochastic_filters": 32,
+            "likelihood_function": likelihood_function,
+            "learn_likelihood_scale": learn_likelihood_scale
         }
 
         learning_rate = 1e-3
@@ -68,18 +72,19 @@ def default_config(dataset_info):
 
         model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
                          f"/{'iaf' if use_iaf else 'gaussian'}/blocks_{num_res_blocks}/" \
-                         f"beta_{beta:.3f}_lamb_{lamb:.3f}"
+                         f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
 
     # Training-time configurations
     iters = 3000000
 
-    shuffle_buffer_size = 10000
-    batch_size = 32
+    shuffle_buffer_size = 5000
+    batch_size = 4
     num_prefetch = 32
 
     # ELBO related stuff
     beta = 1.
-    annealing_end = 100000  # Steps after which beta is fixed
+    anneal = False
+    annealing_end = 150000  # Steps after which beta is fixed
     drop_learning_rate_after_iter = 1500000
     learning_rate_after_drop = 1e-5
 
@@ -217,6 +222,7 @@ def train_vae(dataset,
 
 @ex.capture
 def train_resnet_vae(dataset,
+                     dataset_info,
                      model_save_dir,
                      log_dir,
                      tensorboard_log_freq,
@@ -228,6 +234,8 @@ def train_resnet_vae(dataset,
                      iters,
                      beta,
                      lamb,
+                     anneal,
+                     annealing_end,
                      drop_learning_rate_after_iter,
                      learning_rate_after_drop,
                      num_pixels,
@@ -300,9 +308,10 @@ def train_resnet_vae(dataset,
             kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
 
             # Linearly annealed beta
-            # beta = tf.minimum(beta, tf.cast(ckpt.step / annealing_end, tf.float32))
+            if anneal:
+                current_beta = beta * tf.minimum(1., tf.cast(ckpt.step, tf.float32) / annealing_end)
 
-            loss = -log_likelihood + beta * kld
+            loss = -log_likelihood + current_beta * kld
 
         if tf.math.is_nan(loss) or tf.math.is_inf(loss):
             raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
@@ -324,6 +333,7 @@ def train_resnet_vae(dataset,
             true_elbo = log_likelihood - kld
 
             with summary_writer.as_default():
+                tfs.scalar(name="Beta", data=current_beta, step=ckpt.step)
                 tfs.scalar(name="Loss", data=loss, step=ckpt.step)
                 tfs.scalar(name="NLL", data=-log_likelihood, step=ckpt.step)
                 tfs.scalar(name="Total_KL_plus_Free_bits", data=kld, step=ckpt.step)
@@ -343,6 +353,21 @@ def train_resnet_vae(dataset,
                 tfs.scalar(name="Likelihood_Scale",
                            data=tf.math.exp(model.likelihood_log_scale),
                            step=ckpt.step)
+
+                # If we are training for lossy compression
+                if dataset_info["dataset_name"] in ["clic2019"]:
+                    psnr = tf.image.psnr(reconstruction, batch + 0.5, max_val=1.0)
+                    psnr = tf.reduce_mean(psnr)
+                    ms_ssim = tf.image.ssim_multiscale(reconstruction, batch + 0.5, max_val=1.0)
+                    ms_ssim = tf.reduce_mean(ms_ssim)
+
+                    tfs.scalar(name="Average_PSNR",
+                               data=psnr,
+                               step=ckpt.step)
+
+                    tfs.scalar(name="Average_MS-SSIM",
+                               data=ms_ssim,
+                               step=ckpt.step)
 
                 tfs.image(name="Original", data=batch + 0.5, step=ckpt.step)
                 tfs.image(name="Reconstruction", data=reconstruction, step=ckpt.step)

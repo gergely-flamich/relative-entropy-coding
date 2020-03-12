@@ -120,7 +120,7 @@ def load_dataset(tfds_name,
 
             dataset = tf.data.Dataset.from_tensor_slices(files)
             dataset = dataset.map(
-                read_png, num_parallel_calls=32)
+                read_png, num_parallel_calls=16)
 
             if split == "train":
                 dataset = dataset.map(

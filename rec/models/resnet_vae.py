@@ -1,9 +1,12 @@
+from typing import Tuple
+
 import numpy as np
 
 import tensorflow as tf
 import tensorflow_probability as tfp
 
 from .custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
+from rec.coding import Encoder, Decoder, GaussianEncoder, GaussianDecoder
 
 tfl = tf.keras.layers
 tfk = tf.keras
@@ -20,12 +23,12 @@ class BidirectionalResidualBlock(tfl.Layer):
     """
 
     def __init__(self,
-                 stochastic_filters,
-                 deterministic_filters,
-                 kernel_size=(3, 3),
-                 use_iaf=False,
-                 is_last=False,
-                 name="bidirectional_resnet_block",
+                 stochastic_filters: int,
+                 deterministic_filters: int,
+                 kernel_size: Tuple[int, int] =(3, 3),
+                 use_iaf: bool = False,
+                 is_last: bool = False,
+                 name: str ="bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
@@ -89,6 +92,12 @@ class BidirectionalResidualBlock(tfl.Layer):
         self.gen_iaf_autoregressive_context = None
 
         self.empirical_kld = 0.
+
+        # ---------------------------------------------------------------------
+        # Stuff for compression
+        # ---------------------------------------------------------------------
+        self.encoder = None
+        self.decoder = None
 
         # ---------------------------------------------------------------------
         # Initialization flag
@@ -221,7 +230,7 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         super().build(input_shape=input_shape)
 
-    def call(self, tensor, latent_code=None, inference_pass=True, eps=1e-7):
+    def call(self, tensor, inference_pass=True, encoder_args=None, decoder_args=None, eps=1e-7):
         """
 
         :param tensor: data to be passed through the residual block
@@ -230,9 +239,6 @@ class BidirectionalResidualBlock(tfl.Layer):
         :param inference_pass:
         :return:
         """
-
-        if latent_code is not None:
-            assert latent_code.shape == tensor.shape
 
         input = tensor
 
@@ -270,8 +276,12 @@ class BidirectionalResidualBlock(tfl.Layer):
             self.prior = tfd.Normal(loc=self.prior_loc,
                                     scale=self.prior_scale)
 
+            # -----------------------------------------------------------------
+            # Training
+            # -----------------------------------------------------------------
+
             # If no latent code is provided, we need to create it
-            if latent_code is None:
+            if encoder_args is None or decoder_args is None:
                 # Calculate second part of posterior statistics
                 self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
@@ -311,6 +321,27 @@ class BidirectionalResidualBlock(tfl.Layer):
 
                 self.empirical_kld = post_log_prob - prior_log_prob
 
+            # -----------------------------------------------------------------
+            # Compression
+            # -----------------------------------------------------------------
+            if encoder_args is not None:
+
+                # Calculate second part of posterior statistics
+                self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
+                self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
+
+                # The loc and scale are automagically calculated using property methods
+                self.posterior = tfd.Normal(loc=self.posterior_loc,
+                                            scale=self.posterior_scale)
+
+                indices, latent_code = self.encoder(**encoder_args)
+
+            # -----------------------------------------------------------------
+            # Decompression
+            # -----------------------------------------------------------------
+            if decoder_args is not None:
+                latent_code = self.decoder(**decoder_args)
+
             # Calculate next set of deterministic features for residual block
             tensor = self.gen_conv1(tensor)
 
@@ -325,7 +356,20 @@ class BidirectionalResidualBlock(tfl.Layer):
         # https://github.com/hilloc-submission/hilloc/blob/b89e9c983e3764798e7c6f81f5cfc1d11b349d96/experiments/rvae/model/__init__.py#L116
         tensor = input + 0.1 * tensor
 
+        if encoder_args is not None:
+            return indices, tensor
+
         return tensor
+
+    def initialize_coders(self, kl_per_partition=10.0):
+        self.encoder = GaussianEncoder(target_dist=self.posterior,
+                                       coding_dist=self.prior,
+                                       kl_per_partition=kl_per_partition)
+
+        self.encoder.initialize()
+
+        self.decoder = GaussianDecoder(coding_dist=self.prior,
+                                       auxiliary_variable_variance_ratios=self.encoder.aux_variable_variance_ratios)
 
     def posterior_log_prob(self, tensor):
         if self.use_iaf:
@@ -346,8 +390,17 @@ class BidirectionalResNetVAE(tfk.Model):
     In Advances in Neural Information ProcessingSystems (NIPS), 2016.
     """
 
+    AVAILABLE_LIKELIHOODS = [
+        "discretized_logistic",
+        "gaussian",
+        "laplace",
+        "ms-ssim"
+    ]
+
     def __init__(self,
                  num_res_blocks,
+                 likelihood_function="discretized_logistic",
+                 learn_likelihood_scale=True,
                  first_kernel_size=(5, 5),
                  first_strides=(2, 2),
                  kernel_size=(3, 3),
@@ -367,6 +420,14 @@ class BidirectionalResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         self.num_res_blocks = num_res_blocks
 
+        self.learn_likelihood_scale = learn_likelihood_scale
+
+        if likelihood_function not in self.AVAILABLE_LIKELIHOODS:
+            raise ModelError(f"Likelihood function must be one of: {self.AVAILABLE_LIKELIHOODS}! "
+                             f"({likelihood_function} was given).")
+
+        self._likelihood_function = likelihood_function
+
         self.first_kernel_size = first_kernel_size
         self.first_strides = first_strides
 
@@ -383,7 +444,9 @@ class BidirectionalResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         # Create parameters
         # ---------------------------------------------------------------------
-        self.likelihood_log_scale = tf.Variable(0., name="likelihood_log_scale")
+        self.likelihood_log_scale = tf.Variable(0.,
+                                                name="likelihood_log_scale",
+                                                trainable=self.learn_likelihood_scale)
 
         # ---------------------------------------------------------------------
         # Create ResNet Layers
@@ -431,6 +494,58 @@ class BidirectionalResNetVAE(tfk.Model):
 
         return tf.tile(base, [batch_size, height // 2, width // 2, 1])
 
+    @property
+    def likelihood_function(self):
+
+        likelihood_scale = tf.math.exp(self.likelihood_log_scale)
+
+        def discretized_logistic(reference, reconstruction, binsize=1./256.):
+
+            # Discretize the output
+            discretized_input = tf.math.floor(reference / binsize) * binsize
+            discretized_input = (discretized_input - reconstruction) / likelihood_scale
+
+            log_likelihood = tf.nn.sigmoid(discretized_input + binsize / likelihood_scale)
+            log_likelihood = log_likelihood - tf.nn.sigmoid(discretized_input)
+
+            log_likelihood = tf.math.log(log_likelihood + 1e-7)
+            return tf.reduce_sum(log_likelihood, [1, 2, 3])
+
+        def gaussian_log_prob(reference, reconstruction):
+            likelihood = tfd.Normal(loc=reconstruction, scale=likelihood_scale)
+            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+
+        def laplace_log_prob(reference, reconstruction):
+            likelihood = tfd.Laplace(loc=reconstruction, scale=likelihood_scale)
+
+            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+
+        # TODO
+        def discretized_laplace_log_prob(reference, reconstruction, binsize=1./256.):
+
+            # Discretize the output
+            discretized_input = tf.math.floor(reference / binsize) * binsize
+
+        def ms_ssim_pseudo_log_prob(reference, reconstruction):
+            return 1. / likelihood_scale * tf.image.ssim_multiscale(reference / likelihood_scale,
+                                                                    reconstruction / likelihood_scale,
+                                                                    max_val=1.0)
+
+        if self._likelihood_function == "discretized_logistic":
+            return discretized_logistic
+
+        elif self._likelihood_function == "gaussian":
+            return gaussian_log_prob
+
+        elif self._likelihood_function == "laplace":
+            return laplace_log_prob
+
+        elif self._likelihood_function == "ms-ssim":
+            return ms_ssim_pseudo_log_prob
+
+        else:
+            raise NotImplementedError
+
     def call(self, tensor, binsize=1 / 256.0):
         input = tensor
         batch_size, height, width, _ = input.shape
@@ -442,7 +557,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
         # We go through the residual blocks in reverse topological order for the inference pass
         for res_block in self.residual_blocks[::-1]:
-            tensor = res_block(tensor, latent_code=None, inference_pass=True)
+            tensor = res_block(tensor, inference_pass=True)
 
         # ---------------------------------------------------------------------
         # Perform Generative Pass
@@ -451,7 +566,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
         # We go through the residual blocks in topological order for the generative pass
         for res_block in self.residual_blocks:
-            tensor = res_block(tensor, latent_code=None, inference_pass=False)
+            tensor = res_block(tensor, inference_pass=False)
 
         reconstruction = tf.nn.elu(tensor)
         reconstruction = self.last_gen_conv(reconstruction)
@@ -464,17 +579,8 @@ class BidirectionalResNetVAE(tfk.Model):
         # self.log_likelihood = self.likelihood_dist.log_prob(original_tensor)
 
         # Discretized Logistic Likelihood
-        likelihood_scale = tf.math.exp(self.likelihood_log_scale)
-
-        # Discretize the output
-        discretized_input = tf.math.floor(input / binsize) * binsize
-        discretized_input = (discretized_input - reconstruction) / likelihood_scale
-
-        self.log_likelihood = tf.nn.sigmoid(discretized_input + binsize / likelihood_scale)
-        self.log_likelihood = self.log_likelihood - tf.nn.sigmoid(discretized_input)
-
-        self.log_likelihood = tf.math.log(self.log_likelihood + 1e-7)
-        self.log_likelihood = tf.reduce_mean(tf.reduce_sum(self.log_likelihood, [1, 2, 3]))
+        log_likelihood = self.likelihood_function(input, reconstruction)
+        self.log_likelihood = tf.reduce_mean(log_likelihood)
 
         # If it's the initialization round, create our EMA shadow variables
         if not self.is_ema_variables_initialized:
@@ -548,29 +654,52 @@ class BidirectionalResNetVAE(tfk.Model):
     # Compression
     # =========================================================================
 
-    def compress(self, image, coding_mechanism, lossless=True):
+    def initialize_coders(self, images, kl_per_partition=10.0):
+        # To initialize the coders, we first perform a forward pass with the supplied images.
+        # This will set the posteriors and priors in the resicdual blocks
+        self.call(images)
+
+        for res_block in self.residual_blocks:
+            res_block.initialize_coders(kl_per_partition=kl_per_partition)
+
+    def compress(self, image, seed, lossless=True):
 
         tensor = image
+
+        tensor = self.first_infer_conv(tensor)
 
         # We first calculate the inference statistics of the image.
         # Note that the ResNet blocks are ordered according to the order of a generative pass,
         # so we iterate the list in reverse
         for resnet_block in self.residual_blocks[::-1]:
-            tensor = resnet_block(tensor, latent_code=None, inference_pass=True)
+            tensor = resnet_block(tensor, inference_pass=True,)
 
         # Once the inference pass is complete, we code each of the blocks sequentially
         tensor = self.generative_base()
 
+        block_indices = []
         for resnet_block in self.residual_blocks:
-            latent_code, compressed_code = coding_mechanism(tensor)
+            indices, tensor = resnet_block(tensor, inference_pass=False, encoder_args={"seed": seed})
 
-            tensor = resnet_block(tensor, latent_code=latent_code, inference_pass=False)
+            block_indices.append(indices)
 
-    def decompress(self, compressed_codes, decoding_mechanism, lossless=True):
+        reconstruction = tf.nn.elu(tensor)
+        reconstruction = self.last_gen_conv(reconstruction)
+        reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
+
+        return block_indices, reconstruction
+
+    def decompress(self, compressed_codes, seed, lossless=True):
 
         tensor = self.generative_base()
 
         # We sequentially decode through the resnet blocks
         for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
-            latent_code = decoding_mechanism(compressed_code)
-            tensor = resnet_block(tensor, latent_code=latent_code, inference_pass=False)
+            tensor = resnet_block(tensor, inference_pass=False, decoder_args={"seed": seed,
+                                                                              "indices": compressed_codes})
+
+        reconstruction = tf.nn.elu(tensor)
+        reconstruction = self.last_gen_conv(reconstruction)
+        reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
+
+        return reconstruction + 0.5
