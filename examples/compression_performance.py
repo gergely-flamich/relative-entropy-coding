@@ -18,8 +18,15 @@ ex = Experiment("compression_performance", ingredients=[data_ingredient])
 
 @ex.config
 def default_config(dataset_info):
+    # Can be "compress" or "initialize"
+    mode = "compress"
 
-    num_test_images = 3
+    if mode == "compress":
+        num_test_images = 3
+
+    elif mode == "initialize":
+        num_test_images = 300
+        batch_size = 128
 
     # Model configurations
     model_save_base_dir = "/scratch/gf332/models/relative-entropy-coding"
@@ -70,20 +77,17 @@ def test_vae(dataset):
 
 
 @ex.capture
-def test_resnet_vae(model_config,
-                    model_save_dir,
-                    num_test_images,
-                    dataset,
-                    kl_per_partition,
-                    test_dataset_name,
-                    num_pixels,
-                    num_channels,
-                    _log):
-
+def resnet_vae_initialize(dataset_info,
+                          model_config,
+                          model_save_dir,
+                          num_test_images,
+                          batch_size,
+                          dataset,
+                          _log):
     # -------------------------------------------------------------------------
     # Batch the dataset
     # -------------------------------------------------------------------------
-    dataset = dataset.batch(num_test_images).take(1)
+    dataset = dataset.take(num_test_images).batch(batch_size)
 
     # -------------------------------------------------------------------------
     # Create model
@@ -91,7 +95,7 @@ def test_resnet_vae(model_config,
     model = BidirectionalResNetVAE(**model_config)
 
     # Initialize_model_weights
-    model(tf.zeros((1, 32, 32, num_channels)))
+    model(tf.zeros((1, 32, 32, dataset_info["num_channels"])))
 
     # -------------------------------------------------------------------------
     # Create Checkpoints
@@ -112,24 +116,67 @@ def test_resnet_vae(model_config,
     # Swap in Exponential Moving Average shadow variables for evaluation
     model.swap_in_ema_variables()
 
-    for images in dataset:
-        model(images)
-
-    if test_dataset_name == "clic2019":
-        num_pixels = images.shape[1] * images.shape[2]
-
-    kld = model.kl_divergence(empirical=True, minimum_kl=0.)
-    neg_elbo = -model.log_likelihood + kld
-    bpp = neg_elbo / (num_pixels * np.log(2))
-    bpd = bpp / num_channels
-
-    print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
-
     # -------------------------------------------------------------------------
     # Set-up for compression
     # -------------------------------------------------------------------------
     for images in dataset:
         model.update_coders(images)
+
+    # Save model
+    save_path = manager.save()
+    _log.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
+
+
+@ex.capture
+def resnet_vae_compress(model_config,
+                        model_save_dir,
+                        num_test_images,
+                        dataset,
+                        dataset_info,
+                        _log):
+    # -------------------------------------------------------------------------
+    # Batch the dataset
+    # -------------------------------------------------------------------------
+    dataset = dataset.batch(num_test_images).take(1)
+
+    # -------------------------------------------------------------------------
+    # Create model
+    # -------------------------------------------------------------------------
+    model = BidirectionalResNetVAE(**model_config)
+
+    # Initialize_model_weights
+    model(tf.zeros((1, 32, 32, dataset_info["num_channels"])))
+
+    # -------------------------------------------------------------------------
+    # Create Checkpoints
+    # -------------------------------------------------------------------------
+    optimizer = tf.optimizers.Adamax()
+    ckpt = tf.train.Checkpoint(model=model,
+                               optimizer=optimizer)
+
+    manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=3)
+
+    # Restore previous session
+    ckpt.restore(manager.latest_checkpoint)
+    if manager.latest_checkpoint:
+        _log.info(f"Restored model from {manager.latest_checkpoint}")
+    else:
+        _log.info("Initializing model from scratch.")
+
+    for images in dataset:
+        model(images)
+
+    if dataset_info["dataset_name"] == "clic2019":
+        num_pixels = images.shape[1] * images.shape[2]
+    else:
+        num_pixels = dataset_info["num_pixels"]
+
+    kld = model.kl_divergence(empirical=True, minimum_kl=0.)
+    neg_elbo = -model.log_likelihood + kld
+    bpp = neg_elbo / (num_pixels * np.log(2))
+    bpd = bpp / dataset_info["num_channels"]
+
+    print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
 
     # -------------------------------------------------------------------------
     # Compress images
@@ -139,16 +186,19 @@ def test_resnet_vae(model_config,
 
 
 @ex.automain
-def compress_data(model, _log):
-    dataset, num_pixels, num_channels, test_dataset_name = load_dataset(split="test")
+def compress_data(model, mode, _log):
+    dataset = load_dataset(split="test")
 
     if model == "vae":
         _log.info("Testing MNIST VAE!")
         test_vae(dataset=dataset)
 
     elif model == "resnet_vae":
-        _log.info("Testing a ResNet VAE!")
-        test_resnet_vae(dataset=dataset,
-                        test_dataset_name=test_dataset_name,
-                        num_pixels=num_pixels,
-                        num_channels=num_channels)
+        if mode == "compress":
+            _log.info("Compressing using a ResNet VAE!")
+            resnet_vae_compress(dataset=dataset)
+
+        elif mode == "initialize":
+            _log.info("Initializing compressors for a ResNet VAE!")
+            resnet_vae_initialize(dataset=dataset)
+

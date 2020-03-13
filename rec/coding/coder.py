@@ -189,7 +189,8 @@ class GaussianEncoder(Encoder):
         if self.average_counts is None:
             raise CodingError("Coder must be initialized!")
 
-        return self.sum_aux_variable_variance_ratios / self.average_counts
+        # The first item is always undefined, since it is implictly the same as the second item
+        return (self.sum_aux_variable_variance_ratios / self.average_counts)[1:]
 
     def update_auxiliary_variance_ratios(self,
                                          target_dist,
@@ -375,18 +376,24 @@ class GaussianEncoder(Encoder):
 
         self._initialized.assign(True)
 
-    def call(self, seed):
+    def call(self, target_dist, coding_dist, seed):
 
         if not self._initialized:
             raise CodingError("Coder has not been initialized yet, please call initialize() first!")
 
-        target_dist = self.target_dist
-        coding_dist = self.coding_dist
-
         indices = []
         aggregate_sample = 0.
 
-        for aux_variable_variance_ratio in self.aux_variable_variance_ratios:
+        total_kl = tf.reduce_sum(tfd.kl_divergence(target_dist, coding_dist))
+        num_aux_variables = 1 + tf.cast(tf.math.floor(total_kl / self.kl_per_partition), tf.int32)
+
+        # If there are more auxiliary variables needed than what we are already storing, we update our estimates
+        if num_aux_variables > self.average_counts.shape[0]:
+            print("More auxiliary variables required, updating internal statistics!")
+            self.update_auxiliary_variance_ratios(target_dist=target_dist,
+                                                  coding_dist=coding_dist)
+
+        for aux_variable_variance_ratio in self.aux_variable_variance_ratios[:num_aux_variables][::-1]:
             auxiliary_var = aux_variable_variance_ratio * coding_dist.scale ** 2
 
             auxiliary_target = get_auxiliary_target(target=target_dist,
@@ -412,6 +419,15 @@ class GaussianEncoder(Encoder):
             coding_dist = get_conditional_coder(coder=coding_dist,
                                                 auxiliary_var=auxiliary_var,
                                                 auxiliary_sample=sample)
+
+        # Sample the last auxiliary variable
+        index, sample = self.sampler.coded_sample(target=target_dist,
+                                                  coder=coding_dist,
+                                                  seed=seed)
+
+        indices.append(index)
+
+        aggregate_sample = aggregate_sample + sample
 
         return indices, aggregate_sample
 

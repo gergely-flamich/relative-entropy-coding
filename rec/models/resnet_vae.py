@@ -366,11 +366,6 @@ class BidirectionalResidualBlock(tfl.Layer):
         self.encoder.update_auxiliary_variance_ratios(target_dist=self.posterior,
                                                       coding_dist=self.prior)
 
-        print(self.encoder.aux_variable_variance_ratios)
-
-        # self.decoder = GaussianDecoder(coding_dist=self.prior,
-        #                                auxiliary_variable_variance_ratios=self.encoder.aux_variable_variance_ratios)
-
     def posterior_log_prob(self, tensor):
         if self.use_iaf:
             raise NotImplementedError
@@ -664,6 +659,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
     def compress(self, image, seed, lossless=True):
 
+        batch_size, height, width, _ = image.shape
         tensor = image
 
         tensor = self.first_infer_conv(tensor)
@@ -675,7 +671,9 @@ class BidirectionalResNetVAE(tfk.Model):
             tensor = resnet_block(tensor, inference_pass=True,)
 
         # Once the inference pass is complete, we code each of the blocks sequentially
-        tensor = self.generative_base()
+        tensor = self.generative_base(batch_size=batch_size,
+                                      width=width,
+                                      height=height)
 
         block_indices = []
         for resnet_block in self.residual_blocks:
@@ -690,6 +688,9 @@ class BidirectionalResNetVAE(tfk.Model):
         return block_indices, reconstruction
 
     def decompress(self, compressed_codes, seed, lossless=True):
+
+        # TODO
+        batch_size, height, width, _ = 1, 16, 16, None
 
         tensor = self.generative_base()
 
