@@ -19,7 +19,7 @@ ex = Experiment("compression_performance", ingredients=[data_ingredient])
 @ex.config
 def default_config(dataset_info):
 
-    num_test_images = 1
+    num_test_images = 3
 
     # Model configurations
     model_save_base_dir = "/scratch/gf332/models/relative-entropy-coding"
@@ -129,7 +129,7 @@ def test_resnet_vae(model_config,
     # Set-up for compression
     # -------------------------------------------------------------------------
     for images in dataset:
-        model.initialize_coders(images, kl_per_partition=kl_per_partition)
+        model.update_coders(images)
 
     # -------------------------------------------------------------------------
     # Compress images
