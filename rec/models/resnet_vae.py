@@ -28,6 +28,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                  kernel_size: Tuple[int, int] =(3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
+                 kl_per_partition = 10.0,
                  name: str ="bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
@@ -96,8 +97,10 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
         # Stuff for compression
         # ---------------------------------------------------------------------
-        self.encoder = None
-        self.decoder = None
+        self.encoder = GaussianEncoder(kl_per_partition=kl_per_partition,
+                                       name=f"encoder_for_{self.name}")
+
+        self.decoder = GaussianDecoder(name=f"decoder_for_{self.name}")
 
         # ---------------------------------------------------------------------
         # Initialization flag
@@ -170,7 +173,7 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
         # Stuff for the generative side
         # Note: In the general case, these should technically be deconvolutions, but
-        # in the original implementation the dimensions within a single filter do not
+        # in the original implementation the dimensions within a single block do not
         # decrease, hence there is not much point in using the more expensive operation
         # ---------------------------------------------------------------------
         self.gen_conv1 = ReparameterizedConv2D(filters=self.deterministic_filters,
@@ -234,8 +237,6 @@ class BidirectionalResidualBlock(tfl.Layer):
         """
 
         :param tensor: data to be passed through the residual block
-        :param latent_code: If not None during a generative pass, we omit the calculation of the posterior parameters.
-        If not None during an inference pass, it doesn't modify the behaviour. Must be the same shape as tensor
         :param inference_pass:
         :return:
         """
@@ -361,15 +362,9 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         return tensor
 
-    def initialize_coders(self, kl_per_partition=10.0):
-        self.encoder = GaussianEncoder(target_dist=self.posterior,
-                                       coding_dist=self.prior,
-                                       kl_per_partition=kl_per_partition)
-
-        self.encoder.initialize()
-
-        self.decoder = GaussianDecoder(coding_dist=self.prior,
-                                       auxiliary_variable_variance_ratios=self.encoder.aux_variable_variance_ratios)
+    def update_coders(self):
+        self.encoder.update_auxiliary_variance_ratios(target_dist=self.posterior,
+                                                      coding_dist=self.prior)
 
     def posterior_log_prob(self, tensor):
         if self.use_iaf:
@@ -654,16 +649,17 @@ class BidirectionalResNetVAE(tfk.Model):
     # Compression
     # =========================================================================
 
-    def initialize_coders(self, images, kl_per_partition=10.0):
+    def update_coders(self, images):
         # To initialize the coders, we first perform a forward pass with the supplied images.
         # This will set the posteriors and priors in the resicdual blocks
         self.call(images)
 
         for res_block in self.residual_blocks:
-            res_block.initialize_coders(kl_per_partition=kl_per_partition)
+            res_block.update_coders()
 
     def compress(self, image, seed, lossless=True):
 
+        batch_size, height, width, _ = image.shape
         tensor = image
 
         tensor = self.first_infer_conv(tensor)
@@ -675,7 +671,9 @@ class BidirectionalResNetVAE(tfk.Model):
             tensor = resnet_block(tensor, inference_pass=True,)
 
         # Once the inference pass is complete, we code each of the blocks sequentially
-        tensor = self.generative_base()
+        tensor = self.generative_base(batch_size=batch_size,
+                                      width=width,
+                                      height=height)
 
         block_indices = []
         for resnet_block in self.residual_blocks:
@@ -690,6 +688,9 @@ class BidirectionalResNetVAE(tfk.Model):
         return block_indices, reconstruction
 
     def decompress(self, compressed_codes, seed, lossless=True):
+
+        # TODO
+        batch_size, height, width, _ = 1, 16, 16, None
 
         tensor = self.generative_base()
 

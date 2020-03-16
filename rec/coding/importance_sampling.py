@@ -29,7 +29,7 @@ def encode_gaussian_importance_sample(t_loc,
     """
 
     if alpha < 1.:
-        raise CodingError(f"Alpha must be in the range [0, inf), but {alpha} was given!")
+        raise CodingError(f"Alpha must be in the range [1, inf), but {alpha} was given!")
 
     # Fix seed
     tf.random.set_seed(seed)
@@ -46,6 +46,7 @@ def encode_gaussian_importance_sample(t_loc,
 
     # Get the total KL divergence
     kl = tf.reduce_sum(tfd.kl_divergence(target, proposal))
+    kl = kl + (2. if kl < 5. else 0.)
 
     # We need to draw approximately e^KL samples to be guaranteed a low bias sample
     num_samples = tf.cast(tf.math.ceil(tf.exp(kl)), tf.int32)
@@ -70,6 +71,9 @@ def encode_gaussian_importance_sample(t_loc,
 
     chosen_sample = samples[index, ...]
 
+    # Rescale the sample
+    chosen_sample = p_scale * chosen_sample + p_loc
+
     return index, chosen_sample
 
 
@@ -89,9 +93,12 @@ def decode_gaussian_importance_sample(p_loc, p_scale, index, seed):
     proposal = tfd.Normal(loc=tf.zeros_like(p_loc),
                           scale=tf.ones_like(p_scale))
 
-    samples = proposal.sample(tf.cast(index, tf.int64))
+    # Add 1, because the codes begin at 0 not 1
+    samples = proposal.sample(tf.cast(index, tf.int64) + 1)
 
-    return samples[-1]
+    sample = p_scale * samples[index] + p_loc
+
+    return sample
 
 
 

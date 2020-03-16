@@ -5,6 +5,9 @@ from matplotlib import pyplot as plt
 
 from rejection_sampling import *
 
+
+tf.config.experimental.set_visible_devices([], 'GPU')
+
 def get_t_p_gauss(filename, dims=1000):
     t_mean = np.tile(np.load(filename + 'post_loc.npy')[0], 1 + dims // 50)[:dims]
     t_scale = np.tile(np.load(filename + 'post_scale.npy')[0], 1 + dims // 50)[:dims]
