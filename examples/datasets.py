@@ -103,12 +103,13 @@ def load_dataset(tfds_name,
                  training_patch_size,
                  test_split_name):
 
+    if split == "test":
+        split = test_split_name
+
     # If we are loading Kodak or CLIC2019
     if tfds_name is None:
         with tf.device("/CPU:0"):
 
-            if split == "test":
-                split = test_split_name
 
             files = glob.glob(f"{dataset_path}/{split}/*.png")
 
