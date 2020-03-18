@@ -483,6 +483,8 @@ class BidirectionalResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         self._ema_shadow_variables = {}
 
+        self._compressor_initialized = tf.Variable(False, name="compressor_initialized", trainable=False)
+
     def generative_base(self, batch_size, height, width):
 
         base = tf.reshape(self._generative_base, [1, 1, 1, self.deterministic_filters])
@@ -657,7 +659,12 @@ class BidirectionalResNetVAE(tfk.Model):
         for res_block in self.residual_blocks:
             res_block.update_coders()
 
+        self._compressor_initialized.assign(True)
+
     def compress(self, image, seed, lossless=True):
+
+        if not self._compressor_initialized:
+            raise ModelError("The compressor hasn't been initialized yet!")
 
         batch_size, height, width, _ = image.shape
         tensor = image

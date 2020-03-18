@@ -23,6 +23,14 @@ log = tf.math.log
 exp = tf.exp
 
 
+def sigmoid_inverse(x):
+    if tf.reduce_any(x < 0.) or tf.reduce_any(x > 1.):
+        raise ValueError(f"x = {x} was not in the sigmoid function's range ([0, 1])!")
+    x = tf.clip_by_value(x, 1e-10, 1 - 1e-10)
+
+    return tf.math.log(x) - tf.math.log(1. - x)
+
+
 class Encoder(tfl.Layer, abc.ABC):
 
     def __init__(self,
@@ -175,10 +183,16 @@ class GaussianEncoder(Encoder):
 
         # The auxiliary variables are always scaled w.r.t the coding distribution, i.e.
         # Var[A_i] = R_i * Var_{Z_i ~ P(Z_i)}[Z_i]
-        self.sum_aux_variable_variance_ratios = None
+        self.sum_aux_variable_variance_ratios = tf.Variable(tf.zeros([0], dtype=tf.float32),
+                                                            shape=(None,),
+                                                            name="sum_averaged_variance_ratios",
+                                                            trainable=False)
 
         # Counts over how many batch elements we averaged over
-        self.average_counts = None
+        self.average_counts = tf.Variable(tf.zeros([0], dtype=tf.float32),
+                                          shape=(None,),
+                                          name="average_counts",
+                                          trainable=False)
 
         self._initialized = tf.Variable(False,
                                         name="coder_initialized",
@@ -190,14 +204,15 @@ class GaussianEncoder(Encoder):
             raise CodingError("Coder must be initialized!")
 
         # The first item is always undefined, since it is implictly the same as the second item
-        return (self.sum_aux_variable_variance_ratios / self.average_counts)[1:]
+        return self.sum_aux_variable_variance_ratios / self.average_counts
 
     def update_auxiliary_variance_ratios(self,
                                          target_dist,
                                          coding_dist,
-                                         tolerance=1e-5,
-                                         max_iters=500,
-                                         learning_rate=0.1):
+                                         relative_tolerance=1e-5,
+                                         absolute_tolerance=1e-4,
+                                         max_iters=10000,
+                                         learning_rate=0.03):
         print(f"Updating {self.name}!")
 
         # Gather distribution statistics
@@ -215,12 +230,6 @@ class GaussianEncoder(Encoder):
         # Calculate the number of required auxiliary variables for each batch element
         num_aux_variables = 1 + tf.cast(tf.math.floor(total_kl / self.kl_per_partition), tf.int32)
         max_num_variables = tf.reduce_max(num_aux_variables)
-
-        # Intialize the container for the ratios.
-        # The i,j-th entry will contain the optimal variance ratio for the j-th auxiliary variable
-        # for the i-th batch item
-        # Only used for the heuristic initialization
-        reparameterized_aux_variable_var_ratios = [[] for _ in range(num_aux_variables.shape[0])]
 
         sum_variance_ratios = np.zeros(max_num_variables, dtype=np.float32)
         average_counts = np.zeros(max_num_variables, dtype=np.float32)
@@ -245,19 +254,16 @@ class GaussianEncoder(Encoder):
             total_kl = tf.reduce_sum(tfd.kl_divergence(target, coder), axis=data_dims)
 
             # Initialize ratio parameters
-            init = -2. * np.ones(num_elements, dtype=np.float32)
+            init = 1. / ratio * np.ones(num_elements, dtype=np.float32)
 
-            for i in range(num_elements):
+            if ratio < max_num_variables:
+                init = tf.maximum(tf.cast(sum_variance_ratios[ratio] / average_counts[ratio] - 0.1, tf.float32),
+                                  init)
 
-                elem_index = indices[i, 0]
-
-                if len(reparameterized_aux_variable_var_ratios[elem_index]) > 0:
-                    # This heuristic usually works very well, and the optimizer converges in
-                    # approximately 100 iterations
-                    init[i] = reparameterized_aux_variable_var_ratios[elem_index][-1]
-
+            init = sigmoid_inverse(init)
             reparameterized_aux_variable_var_ratio = tf.Variable(init)
 
+            # Compensate in the learning rate for the increased loss
             optimizer = tf.optimizers.Adam(learning_rate=learning_rate)
 
             # Optimize the current ratio using SGD
@@ -286,13 +292,14 @@ class GaussianEncoder(Encoder):
 
                         # Make a quadratic loss
                         kl_loss = square(auxiliary_kl - total_kl / tf.cast(ratio, tf.float32))
-                        total_kl_loss = tf.reduce_sum(kl_loss)
+                        total_kl_loss = tf.reduce_mean(kl_loss)
 
                     gradient = tape.gradient(total_kl_loss, reparameterized_aux_variable_var_ratio)
                     optimizer.apply_gradients([(gradient, reparameterized_aux_variable_var_ratio)])
 
                     # Early stop if the loss decreases less than the tolerance
-                    if tf.abs(prev_loss - total_kl_loss) < tolerance:
+                    if total_kl_loss < absolute_tolerance and \
+                            tf.abs(prev_loss - total_kl_loss) < relative_tolerance:
                         break
 
                     prev_loss = total_kl_loss
@@ -333,46 +340,24 @@ class GaussianEncoder(Encoder):
         # by creating variables
         # ---------------------------------------------------------------------
 
-        # If we haven't created the variables, create them now
-        if self.average_counts is None:
-            self.average_counts = tf.Variable(average_counts,
-                                              name="average_counts",
-                                              trainable=False)
-
-            self.sum_aux_variable_variance_ratios = tf.Variable(sum_variance_ratios,
-                                                                name="sum_averaged_variance_ratios",
-                                                                trainable=False)
-
         # If the variables exist already, we combine them
+        num_stored_vars = self.average_counts.value().shape[0]
+
+        # If there are are more dimensions than we previously had, we need to extend our variables
+        if num_stored_vars < max_num_variables:
+            # Update the indices that exist
+            sum_variance_ratios[:num_stored_vars] += self.aux_variable_variance_ratios.numpy()
+            average_counts[:num_stored_vars] += self.average_counts.numpy()
+
+        # If the number of dimensions is fewer than we previously had, we do a simple update
         else:
-            # If there are are more dimensions than we previously had, we need to extend our variables
-            num_stored_vars = self.average_counts.shape[0]
+            # Update the indices that exist
+            sum_variance_ratios += self.aux_variable_variance_ratios[:max_num_variables].numpy()
+            average_counts += self.average_counts[:max_num_variables].numpy()
 
-            if num_stored_vars < num_aux_variables:
-
-                # Update the indices that exist
-                sum_variance_ratios[:num_stored_vars] += self.aux_variable_variance_ratios.numpy()
-                average_counts[:num_stored_vars] += self.average_counts.numpy()
-
-                # Create "longer" variables
-                self.average_counts = tf.Variable(average_counts,
-                                                  name="average_counts",
-                                                  trainable=False)
-
-                self.sum_aux_variable_variance_ratios = tf.Variable(sum_variance_ratios,
-                                                                    name="sum_averaged_variance_ratios",
-                                                                    trainable=False)
-
-            # If the number of dimensions is fewer than we previously had, we do a simple update
-            else:
-
-                # Update the indices that exist
-                sum_variance_ratios += self.aux_variable_variance_ratios[:num_aux_variables].numpy()
-                average_counts += self.average_counts[:num_aux_variables].numpy()
-
-                # Create "longer" variables
-                self.average_counts.assign(average_counts)
-                self.sum_aux_variable_variance_ratios(sum_variance_ratios)
+        # Assign values
+        self.average_counts.assign(average_counts)
+        self.sum_aux_variable_variance_ratios.assign(sum_variance_ratios)
 
         self._initialized.assign(True)
 
@@ -393,7 +378,9 @@ class GaussianEncoder(Encoder):
             self.update_auxiliary_variance_ratios(target_dist=target_dist,
                                                   coding_dist=coding_dist)
 
-        for aux_variable_variance_ratio in self.aux_variable_variance_ratios[:num_aux_variables][::-1]:
+        # We iterate from the second entry in the ratios, because the first entry is *implicitly*
+        # the same as the second, but in reality it is NaN!
+        for aux_variable_variance_ratio in self.aux_variable_variance_ratios[1:num_aux_variables][::-1]:
             auxiliary_var = aux_variable_variance_ratio * coding_dist.scale ** 2
 
             auxiliary_target = get_auxiliary_target(target=target_dist,

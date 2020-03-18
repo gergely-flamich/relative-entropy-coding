@@ -1,5 +1,7 @@
 from sacred import Experiment
 
+import os
+
 import json
 import datetime
 
@@ -22,7 +24,7 @@ def default_config(dataset_info):
     mode = "compress"
 
     if mode == "compress":
-        num_test_images = 3
+        num_test_images = 1
 
     elif mode == "initialize":
         num_test_images = 300
@@ -100,31 +102,39 @@ def resnet_vae_initialize(dataset_info,
     # -------------------------------------------------------------------------
     # Create Checkpoints
     # -------------------------------------------------------------------------
-    optimizer = tf.optimizers.Adamax()
-    ckpt = tf.train.Checkpoint(model=model,
-                               optimizer=optimizer)
+    if not os.path.exists(f"{model_save_dir}/compressor_initialized.index"):
+        optimizer = tf.optimizers.Adamax()
+        ckpt = tf.train.Checkpoint(model=model,
+                                   optimizer=optimizer)
 
-    manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=3)
+        manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=10)
 
-    # Restore previous session
-    ckpt.restore(manager.latest_checkpoint)
-    if manager.latest_checkpoint:
-        _log.info(f"Restored model from {manager.latest_checkpoint}")
+        # Restore previous session
+        ckpt.restore(manager.latest_checkpoint).expect_partial()
+        if manager.latest_checkpoint:
+            _log.info(f"Restored model from {manager.latest_checkpoint}")
+        else:
+            _log.info("Initializing model from scratch.")
+
+        # Swap in Exponential Moving Average shadow variables for evaluation
+        model.swap_in_ema_variables()
+
     else:
-        _log.info("Initializing model from scratch.")
-
-    # Swap in Exponential Moving Average shadow variables for evaluation
-    model.swap_in_ema_variables()
+        model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
 
     # -------------------------------------------------------------------------
     # Set-up for compression
     # -------------------------------------------------------------------------
+    # TODO: remove this asap
+    count = 0
     for images in dataset:
+        if count == 0:
+            count += 1
+            continue
         model.update_coders(images)
+        model.save_weights(f"{model_save_dir}/compressor_initialized")
 
-    # Save model
-    save_path = manager.save()
-    _log.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
+    print(f"Count was {count}")
 
 
 @ex.capture
@@ -148,20 +158,9 @@ def resnet_vae_compress(model_config,
     model(tf.zeros((1, 32, 32, dataset_info["num_channels"])))
 
     # -------------------------------------------------------------------------
-    # Create Checkpoints
+    # Restore model
     # -------------------------------------------------------------------------
-    optimizer = tf.optimizers.Adamax()
-    ckpt = tf.train.Checkpoint(model=model,
-                               optimizer=optimizer)
-
-    manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=3)
-
-    # Restore previous session
-    ckpt.restore(manager.latest_checkpoint)
-    if manager.latest_checkpoint:
-        _log.info(f"Restored model from {manager.latest_checkpoint}")
-    else:
-        _log.info("Initializing model from scratch.")
+    model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
 
     for images in dataset:
         model(images)
