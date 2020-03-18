@@ -185,7 +185,7 @@ def preprocessing_probs(t_list, p_list, buffer_size):
     probs = sum(probs) / len(t_list)
     leftover = 1. - tf.sum(probs)
 
-    pass    
+    pass
 
 
 
