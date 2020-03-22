@@ -366,6 +366,7 @@ class BidirectionalResidualBlock(tfl.Layer):
         self.encoder.update_auxiliary_variance_ratios(target_dist=self.posterior,
                                                       coding_dist=self.prior)
 
+
     def posterior_log_prob(self, tensor):
         if self.use_iaf:
             raise NotImplementedError

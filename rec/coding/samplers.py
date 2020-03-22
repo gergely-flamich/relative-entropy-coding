@@ -6,8 +6,8 @@ import tensorflow_probability as tfp
 
 import numpy as np
 
-from .importance_sampling import encode_gaussian_importance_sample, decode_gaussian_importance_sample
-from .rejection_sampling import gaussian_rejection_sample_small
+from rec.coding.importance_sampling import encode_gaussian_importance_sample, decode_gaussian_importance_sample
+from rec.coding.rejection_sampling import gaussian_rejection_sample_small
 
 tfd = tfp.distributions
 
@@ -85,6 +85,7 @@ class RejectionSampler(Sampler):
         self.sample_buffer_size = sample_buffer_size
         self.R_buffer_size = R_buffer_size
 
+
     def coded_sample(self,
                      target: tfd.Distribution,
                      coder: tfd.Distribution,
@@ -100,5 +101,7 @@ class RejectionSampler(Sampler):
                       coder: tfd.Distribution,
                       sample_index: tf.int64,
                       seed: tf.int64) -> tf.Tensor:
-        return None
+        buffer_seed = seed + sample_index // self.sample_buffer_size
+        buffer = coder.sample((self.sample_buffer_size, ))
+        return buffer[sample_index % self.sample_buffer_size]
 

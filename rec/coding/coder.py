@@ -7,8 +7,8 @@ import numpy as np
 
 from tqdm import trange
 
-from .utils import CodingError
-from .samplers import ImportanceSampler, RejectionSampler
+from rec.coding.utils import CodingError
+from rec.coding.samplers import ImportanceSampler, RejectionSampler
 
 from .rejection_sampling import get_aux_distribution, get_conditionals
 
@@ -16,8 +16,9 @@ tfl = tf.keras.layers
 tfd = tfp.distributions
 
 square = tf.math.square
-log_add_exp = tfp.math.log_add_exp
-log_sub_exp = tfp.math.log_sub_exp
+# TODO these functions don't exist, fix please
+log_add_exp = None  # tfp.math.log_add_exp
+log_sub_exp = None  # tfp.math.log_sub_exp
 
 log = tf.math.log
 exp = tf.exp
