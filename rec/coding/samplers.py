@@ -100,6 +100,7 @@ class RejectionSampler(Sampler):
                       coder: tfd.Distribution,
                       sample_index: tf.int64,
                       seed: tf.int64) -> tf.Tensor:
+        tf.random.set_seed(seed)
         buffer_seed = seed + sample_index // self.sample_buffer_size
         buffer = coder.sample((self.sample_buffer_size, ), seed=buffer_seed)
         return buffer[sample_index % self.sample_buffer_size]

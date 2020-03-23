@@ -13,7 +13,8 @@ def get_t_p_mass(t, p, n_samples=100, oversampling=100):
     y = t.sample((n_samples * oversampling,))
 
     t_mass = -np.log(n_samples) + tf.zeros((n_samples * oversampling,))
-    p_mass = -np.log(n_samples) + tf.reduce_sum(p.log_prob(y) - t.log_prob(y), axis=1)
+    n_axes = len(y.shape)
+    p_mass = -np.log(n_samples) + tf.reduce_sum(p.log_prob(y) - t.log_prob(y), axis=range(1, n_axes))
 
     log_ratios = t_mass - p_mass
     ind = tf.argsort(log_ratios)
@@ -82,9 +83,13 @@ def gaussian_rejection_sample_small(t_dist,
     :return: (sample, index) - tuple containing the sample and the index
     """
     assert(r_buffer_size % sample_buffer_size == 0)
-    log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist)
+    log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist, n_samples=100, oversampling=100)
     r_buffer, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size=r_buffer_size)
-    print('Rejection sampling with KL={}'.format(tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))))
+    kl = tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))
+    if kl >= 20.:
+        raise CodingError('KL divergence={} is too high for rejection sampling'.format(kl))
+
+    tf.random.set_seed(seed)
     i = 0
     for _ in range(int(r_buffer_size // sample_buffer_size)):
         samples = p_dist.sample((sample_buffer_size,), seed=seed + i // sample_buffer_size)
