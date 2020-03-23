@@ -10,7 +10,7 @@ from tqdm import trange
 from rec.coding.utils import CodingError
 from rec.coding.samplers import ImportanceSampler, RejectionSampler
 
-from .rejection_sampling import get_aux_distribution, get_conditionals
+from rec.coding.rejection_sampling import get_aux_distribution, get_conditionals
 
 tfl = tf.keras.layers
 tfd = tfp.distributions

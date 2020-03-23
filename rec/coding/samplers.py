@@ -78,13 +78,12 @@ class ImportanceSampler(Sampler):
 
 class RejectionSampler(Sampler):
 
-    def __init__(self, sample_buffer_size, R_buffer_size, name="rejection_sampler", **kwargs):
+    def __init__(self, sample_buffer_size, r_buffer_size, name="rejection_sampler", **kwargs):
         super().__init__(name=name,
                          **kwargs)
 
         self.sample_buffer_size = sample_buffer_size
-        self.R_buffer_size = R_buffer_size
-
+        self.r_buffer_size = r_buffer_size
 
     def coded_sample(self,
                      target: tfd.Distribution,
@@ -94,7 +93,7 @@ class RejectionSampler(Sampler):
         return gaussian_rejection_sample_small(t_dist=target,
                                                p_dist=coder,
                                                sample_buffer_size=self.sample_buffer_size,
-                                               R_buffer_size=self.R_buffer_size,
+                                               r_buffer_size=self.r_buffer_size,
                                                seed=seed)
 
     def decode_sample(self,
@@ -102,6 +101,6 @@ class RejectionSampler(Sampler):
                       sample_index: tf.int64,
                       seed: tf.int64) -> tf.Tensor:
         buffer_seed = seed + sample_index // self.sample_buffer_size
-        buffer = coder.sample((self.sample_buffer_size, ))
+        buffer = coder.sample((self.sample_buffer_size, ), seed=buffer_seed)
         return buffer[sample_index % self.sample_buffer_size]
 

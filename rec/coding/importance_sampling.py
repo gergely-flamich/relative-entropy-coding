@@ -1,7 +1,7 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from .utils import CodingError, stateless_gumbel_sample
+from rec.coding.utils import CodingError, stateless_gumbel_sample
 
 tfd = tfp.distributions
 

@@ -1,6 +1,5 @@
 import numpy as np
 import math
-
 import tensorflow as tf
 import tensorflow_probability as tfp
 from matplotlib import pyplot as plt
@@ -23,7 +22,6 @@ def get_t_p_mass(t, p, n_samples=100, oversampling=100):
     return tf.gather(log_ratios, reduced_ind), tf.gather(t_mass, reduced_ind), tf.gather(p_mass, reduced_ind)
 
 
-# Fast, vectorized version
 def get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size, dtype=tf.float32):
     t_mass = tf.cast(t_mass, dtype=tf.float64)
     p_mass = tf.cast(p_mass, dtype=tf.float64)
@@ -68,37 +66,52 @@ def get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size, dtype=tf.float32):
 def gaussian_rejection_sample_small(t_dist,
                                     p_dist,
                                     sample_buffer_size,
-                                    R_buffer_size,
+                                    r_buffer_size,
                                     seed=42069):
-    assert(R_buffer_size % sample_buffer_size == 0)
+    """
+    Encodes a single sample from a Gaussian target distribution using another Gaussian coding distribution.
+    Note that the runtime of this function is O(e^KL(q || p)), hence it is the job of the caller to potentially
+    partition a larger Gaussian into smaller codable chunks.
+
+    :param t_dist: the target Gaussian
+    :param p_dist: the coding/proposal Gaussian
+    :param sample_buffer_size: buffer size of the samples
+    :param r_buffer_size: buffer size of rejection sampling, samples beyond this index are treated as if they were drawn
+     at with index
+    :param seed: seed that defines the infinite string of random samples from the coding distribution.
+    :return: (sample, index) - tuple containing the sample and the index
+    """
+    assert(r_buffer_size % sample_buffer_size == 0)
     log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist)
-    R_buffer, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size=R_buffer_size)
+    r_buffer, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size=r_buffer_size)
     print('Rejection sampling with KL={}'.format(tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))))
     i = 0
-    for _ in range(int(R_buffer_size // sample_buffer_size)):
-        samples = p_dist.sample((sample_buffer_size,), seed=seed)
+    for _ in range(int(r_buffer_size // sample_buffer_size)):
+        samples = p_dist.sample((sample_buffer_size,), seed=seed + i // sample_buffer_size)
         n_axes = len(samples.shape)
         sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
-        accepted = (tf.exp(sample_ratios) - R_buffer[i:i+sample_buffer_size]) / \
+        accepted = (tf.exp(sample_ratios) - r_buffer[i:i+sample_buffer_size]) / \
                    (1. - pstar_buffer[i:i+sample_buffer_size]) + tf.random.uniform(shape=sample_ratios.shape)
         accepted_ind = tf.where(accepted > 0.)
         if accepted_ind.shape[0] > 0:
             index = int(accepted_ind[0, 0])
-            return i + index, samples[index]
+            return samples[index], i + index
         i += sample_buffer_size
-    # If not finished in buffer, we accept anything above ratio R
-    R = R_buffer[-1]
+
+    # If not finished in buffer, we accept anything above ratio r
+    r = r_buffer[-1]
     while True:
-        samples = p_dist.sample((sample_buffer_size,), seed=seed)
+        samples = p_dist.sample((sample_buffer_size,), seed=seed + i // sample_buffer_size)
         sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
-        accepted_ind = tf.where(sample_ratios > tf.math.log(R))
+        accepted_ind = tf.where(sample_ratios > tf.math.log(r))
         if accepted_ind.shape[0] > 0:
             index = int(accepted_ind[0, 0])
-            return i + index, samples[index]
+            return samples[index], i + index
         else:
             i += sample_buffer_size
 
 
+# TODO: remove eventually
 def get_aux_distribution(t, p, aux_var):
     p_var = tf.math.pow(p.scale, 2)
     t_var = tf.math.pow(t.scale, 2)
@@ -109,6 +122,7 @@ def get_aux_distribution(t, p, aux_var):
     return ta, pa
 
 
+# TODO: remove eventually
 def get_conditionals(t, p, aux_var, a):
     p_var = tf.math.pow(p.scale, 2)
     t_var = tf.math.pow(t.scale, 2)
@@ -120,6 +134,7 @@ def get_conditionals(t, p, aux_var, a):
     return new_t, new_p
 
 
+# TODO: remove eventually
 def preprocessing_auxiliary_ratios(t_list, p_list, target_kl):
     image_ratio_list = []
     for t, p in zip(t_list, p_list):

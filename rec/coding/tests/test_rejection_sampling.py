@@ -34,7 +34,19 @@ class TestRejectionSampling(unittest.TestCase):
         p = tfp.distributions.Normal(loc=tf.constant([0.]), scale=tf.constant([1.]))
         log_ratios, t_mass, p_mass = get_t_p_mass(t, p, n_samples=10, oversampling=10)
         r_buffer, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size=10000, dtype=tf.float64)
-        r_buffer_baseline, pstar_buffer_baseline = self.get_r_pstar_baseline(log_ratios, t_mass, p_mass, r_buffer_size=10000)
+        r_buffer_baseline, pstar_buffer_baseline = self.get_r_pstar_baseline(log_ratios,
+                                                                             t_mass,
+                                                                             p_mass,
+                                                                             r_buffer_size=10000)
+        assert(np.allclose(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5) and
+               np.allclose(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5))
+
+        log_ratios, t_mass, p_mass = get_t_p_mass(t, p, n_samples=2, oversampling=10)
+        r_buffer, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size=100000, dtype=tf.float64)
+        r_buffer_baseline, pstar_buffer_baseline = self.get_r_pstar_baseline(log_ratios,
+                                                                             t_mass,
+                                                                             p_mass,
+                                                                             r_buffer_size=100000)
         assert(np.allclose(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5) and
                np.allclose(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5))
 
