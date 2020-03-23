@@ -7,7 +7,7 @@ import tensorflow_probability as tfp
 import numpy as np
 
 from rec.coding.importance_sampling import encode_gaussian_importance_sample, decode_gaussian_importance_sample
-from rec.coding.rejection_sampling import gaussian_rejection_sample_small
+from rec.coding.rejection_sampling import gaussian_rejection_sample_small, get_r_pstar, get_t_p_mass
 
 tfd = tfp.distributions
 
@@ -85,6 +85,44 @@ class RejectionSampler(Sampler):
         self.sample_buffer_size = sample_buffer_size
         self.r_buffer_size = r_buffer_size
 
+        self.sum_acceptance_probabilities = tf.Variable(tf.zeros((r_buffer_size,), dtype=tf.float64),
+                                                        name="sum_acceptance_probabilities",
+                                                        trainable=False)
+        # Counts over how many batch elements we averaged over
+        self.average_count = tf.Variable(tf.constant(0, dtype=tf.int64),
+                                         name="average_count",
+                                         trainable=False)
+        self._initialized = tf.Variable(False,
+                                        name="coder_initialized",
+                                        trainable=False)
+        self.acceptance_probabilities = None
+        self.spillover_probability = None
+        self.spillover_acceptance_probability = None
+
+    def update_sampler(self,
+                       target: tfd.Distribution,
+                       coder: tfd.Distribution):
+        log_ratios, t_mass, p_mass = get_t_p_mass(target, coder)
+        _, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, self.r_buffer_size, dtype=tf.float64)
+        self.sum_acceptance_probabilities.assign_add(pstar_buffer)
+        self.sum_acceptance_probabilities[1:].assign(self.sum_acceptance_probabilities[1:] - pstar_buffer[:-1])
+        self.average_count.assign(self.average_count + 1)
+        self.acceptance_probabilities = self.sum_acceptance_probabilities / tf.cast(self.average_count, tf.float64)
+        self.spillover_probability = 1. - tf.reduce_sum(self.acceptance_probabilities)
+        self.spillover_acceptance_probability = self.acceptance_probabilities[-1] / \
+                                                (1. - tf.reduce_sum(self.acceptance_probabilities[:-1]))
+        self._initialized.assign(True)
+
+    def get_codelength(self, index):
+        assert self._initialized
+
+        if index < self.r_buffer_size:
+            return -tf.math.log(self.acceptance_probabilities[index])
+        else:
+            return -(tf.math.log(self.spillover_probability) +
+                     tf.math.log(1. - self.spillover_acceptance_probability) * (index - self.r_buffer_size) +
+                     tf.math.log(self.spillover_acceptance_probability))
+
     def coded_sample(self,
                      target: tfd.Distribution,
                      coder: tfd.Distribution,
@@ -102,6 +140,5 @@ class RejectionSampler(Sampler):
                       seed: tf.int64) -> tf.Tensor:
         tf.random.set_seed(seed)
         buffer_seed = seed + sample_index // self.sample_buffer_size
-        buffer = coder.sample((self.sample_buffer_size, ), seed=buffer_seed)
+        buffer = coder.sample((self.sample_buffer_size,), seed=buffer_seed)
         return buffer[sample_index % self.sample_buffer_size]
-

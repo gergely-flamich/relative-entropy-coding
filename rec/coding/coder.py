@@ -204,7 +204,7 @@ class GaussianEncoder(Encoder):
         if self.average_counts is None:
             raise CodingError("Coder must be initialized!")
 
-        # The first item is always undefined, since it is implictly the same as the second item
+        # The first item is always undefined, since it is implicitly the same as the second item
         return self.sum_aux_variable_variance_ratios / self.average_counts
 
     def update_auxiliary_variance_ratios(self,
