@@ -30,19 +30,10 @@ def sigmoid_inverse(x):
     return tf.math.log(x) - tf.math.log(1. - x)
 
 
-class Encoder(tfl.Layer, abc.ABC):
+class Coder(tfl.Layer, abc.ABC):
 
     def __init__(self,
                  name="encoder",
-                 **kwargs):
-        super().__init__(name=name,
-                         **kwargs)
-
-
-class Decoder(tfl.Layer, abc.ABC):
-
-    def __init__(self,
-                 name="decoder",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
@@ -64,16 +55,6 @@ def get_auxiliary_target(target, coder, auxiliary_var):
     return ta
 
 
-# def get_conditionals(t, p, aux_var, a):
-#     p_var = tf.math.pow(p.scale, 2)
-#     t_var = tf.math.pow(t.scale, 2)
-#     new_t_mean = (p.loc + (a * t_var * p_var + (t.loc - p.loc) * (p_var - aux_var) * p_var) /
-#                (t_var * aux_var + p_var * (p_var - aux_var)))
-#     new_t_var = t_var * p_var * (p_var - aux_var) / (aux_var * t_var + p_var * (p_var - aux_var))
-#     new_p = tfp.distributions.Normal(p.loc + a, tf.sqrt(p_var - aux_var))
-#     new_t = tfp.distributions.Normal(new_t_mean, tf.sqrt(new_t_var))
-#     return new_t, new_p
-
 def get_conditional_coder(coder, auxiliary_var, auxiliary_sample):
     coder_var = tf.math.pow(coder.scale, 2)
 
@@ -91,7 +72,7 @@ def get_conditional_target(target, coder, auxiliary_var, auxiliary_sample):
     return tfp.distributions.Normal(new_t_mean, tf.sqrt(new_t_var))
 
 
-class GaussianEncoder(Encoder):
+class GaussianCoder(Coder):
     def __init__(self,
                  kl_per_partition,
                  sampler: Sampler,
@@ -265,7 +246,7 @@ class GaussianEncoder(Encoder):
 
         self._initialized.assign(True)
 
-    def call(self, target_dist, coding_dist, seed):
+    def encode(self, target_dist, coding_dist, seed):
 
         if not self._initialized:
             raise CodingError("Coder has not been initialized yet, please call initialize() first!")
@@ -282,7 +263,8 @@ class GaussianEncoder(Encoder):
 
         # We iterate backward until the second entry in ratios. The first entry is 1.,
         # in which case we just draw the final sample.
-        for aux_variable_variance_ratio in self.aux_variable_variance_ratios[1:num_aux_variables][::-1]:
+        for i in range(num_aux_variables - 1, 0, -1):
+            aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
             auxiliary_var = aux_variable_variance_ratio * tf.math.pow(coding_dist.scale, 2)
 
             auxiliary_target = get_auxiliary_target(target=target_dist,
@@ -295,6 +277,7 @@ class GaussianEncoder(Encoder):
             index, auxiliary_sample = self.sampler.coded_sample(target=auxiliary_target,
                                                                 coder=auxiliary_coder,
                                                                 seed=seed)
+            seed += 1
 
             indices.append(index)
 
@@ -316,37 +299,27 @@ class GaussianEncoder(Encoder):
 
         return indices, sample
 
+    def decode(self, indices, coding_dist, seed):
+        num_aux_variables = len(indices)
 
-class GaussianDecoder(Decoder):
-    def __init__(self,
-                 sampler: Sampler,
-                 name="gaussian_decoder",
-                 **kwargs):
-        super().__init__(name=name,
-                         **kwargs)
-
-        self.sampler = sampler
-
-    def call(self, indices, seed, aux_variable_variance_ratios):
-
-        aggregate_sample = 0.
-
-        coding_dist = self.coding_dist
-
-        for aux_variable_variance_ratio, index in zip(aux_variable_variance_ratios, indices):
-            auxiliary_var = aux_variable_variance_ratio * coding_dist.scale ** 2
+        indices.reverse()
+        for i in range(num_aux_variables - 1, 0, -1):
+            aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
+            auxiliary_var = aux_variable_variance_ratio * tf.math.pow(coding_dist.scale, 2)
 
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
 
-            sample = self.sampler.decode_sample(coder=auxiliary_coder,
-                                                sample_index=index,
-                                                seed=seed)
-
-            aggregate_sample = aggregate_sample + sample
+            auxiliary_sample = self.sampler.decode_sample(coder=auxiliary_coder,
+                                                          sample_index=indices[i],
+                                                          seed=seed)
+            seed += 1
 
             coding_dist = get_conditional_coder(coder=coding_dist,
                                                 auxiliary_var=auxiliary_var,
-                                                auxiliary_sample=sample)
+                                                auxiliary_sample=auxiliary_sample)
 
-        return aggregate_sample
+        sample = self.sampler.decode_sample(coder=coding_dist,
+                                            sample_index=indices[0],
+                                            seed=seed)
+        return sample

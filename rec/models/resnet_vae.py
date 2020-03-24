@@ -6,7 +6,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from .custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
-from rec.coding import Encoder, Decoder, GaussianEncoder, GaussianDecoder
+from rec.coding import Coder, GaussianCoder
 
 tfl = tf.keras.layers
 tfk = tf.keras
@@ -97,10 +97,8 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
         # Stuff for compression
         # ---------------------------------------------------------------------
-        self.encoder = GaussianEncoder(kl_per_partition=kl_per_partition,
-                                       name=f"encoder_for_{self.name}")
-
-        self.decoder = GaussianDecoder(name=f"decoder_for_{self.name}")
+        self.encoder = GaussianCoder(kl_per_partition=kl_per_partition,
+                                     name=f"encoder_for_{self.name}")
 
         # ---------------------------------------------------------------------
         # Initialization flag
@@ -335,7 +333,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                 self.posterior = tfd.Normal(loc=self.posterior_loc,
                                             scale=self.posterior_scale)
 
-                indices, latent_code = self.encoder(**encoder_args)
+                indices, latent_code = self.encoder.encode(**encoder_args)
 
             # -----------------------------------------------------------------
             # Decompression
