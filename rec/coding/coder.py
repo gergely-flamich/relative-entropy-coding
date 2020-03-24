@@ -8,9 +8,7 @@ import numpy as np
 from tqdm import trange
 
 from rec.coding.utils import CodingError
-from rec.coding.samplers import ImportanceSampler, RejectionSampler
-
-from rec.coding.rejection_sampling import get_aux_distribution, get_conditionals
+from rec.coding.samplers import Sampler
 
 tfl = tf.keras.layers
 tfd = tfp.distributions
@@ -56,111 +54,47 @@ def get_auxiliary_coder(coder, auxiliary_var):
     return auxiliary_coder
 
 
-# def get_auxiliary_target(target, coder, auxiliary_var):
-#     target_var = square(target.scale)
-#     coder_var = square(coder.scale)
-#
-#     aux_var_over_coder_var = auxiliary_var / coder_var
-#
-#     # The auxiliary target is q(A_i | Z) and the auxiliary coder is p(A_i | Z)
-#     auxiliary_target_mean = (target.loc - coder.loc) * aux_var_over_coder_var
-#
-#     auxiliary_target_variance = target_var * square(aux_var_over_coder_var)
-#     auxiliary_target_variance += (coder_var - auxiliary_var) * aux_var_over_coder_var
-#
-#     auxiliary_target = tfd.Normal(loc=auxiliary_target_mean, scale=tf.sqrt(auxiliary_target_variance))
-#
-#     return auxiliary_target
-def get_auxiliary_target(target, coder, auxiliary_var, eps=1e-7):
-    log_target_var = 2 * log(target.scale + eps)
-    log_coder_var = 2 * log(coder.scale + eps)
-    log_aux_var = log(auxiliary_var + eps)
+def get_auxiliary_target(target, coder, auxiliary_var):
+    coder_var = tf.math.pow(coder.scale, 2)
+    target_var = tf.math.pow(target.scale, 2)
+    auxiliary_target_mean = (target.loc - coder.loc) * auxiliary_var / coder_var
+    auxiliary_target_var = target_var * tf.math.pow(auxiliary_var, 2) / tf.math.pow(coder_var, 2) \
+                        + auxiliary_var * (coder_var - auxiliary_var) / coder_var
+    ta = tfp.distributions.Normal(loc=auxiliary_target_mean, scale=tf.sqrt(auxiliary_target_var))
+    return ta
 
-    log_aux_var_over_coder_var = log_aux_var - log_coder_var
 
-    # The auxiliary target is q(A_i | Z) and the auxiliary coder is p(A_i | Z)
-    auxiliary_target_mean = (target.loc - coder.loc) * exp(log_aux_var_over_coder_var)
-
-    log_auxiliary_target_variance = log_add_exp(log_target_var + 2 * log_aux_var_over_coder_var,
-                                                log_sub_exp(log_coder_var, log_aux_var) + log_aux_var_over_coder_var)
-
-    auxiliary_target = tfd.Normal(loc=auxiliary_target_mean, scale=exp(0.5 * log_auxiliary_target_variance))
-
-    return auxiliary_target
-
+# def get_conditionals(t, p, aux_var, a):
+#     p_var = tf.math.pow(p.scale, 2)
+#     t_var = tf.math.pow(t.scale, 2)
+#     new_t_mean = (p.loc + (a * t_var * p_var + (t.loc - p.loc) * (p_var - aux_var) * p_var) /
+#                (t_var * aux_var + p_var * (p_var - aux_var)))
+#     new_t_var = t_var * p_var * (p_var - aux_var) / (aux_var * t_var + p_var * (p_var - aux_var))
+#     new_p = tfp.distributions.Normal(p.loc + a, tf.sqrt(p_var - aux_var))
+#     new_t = tfp.distributions.Normal(new_t_mean, tf.sqrt(new_t_var))
+#     return new_t, new_p
 
 def get_conditional_coder(coder, auxiliary_var, auxiliary_sample):
-    coder_var = square(coder.scale)
+    coder_var = tf.math.pow(coder.scale, 2)
 
-    new_coder = tfd.Normal(loc=coder.loc + auxiliary_sample,
-                           scale=tf.sqrt(coder_var - auxiliary_var))
-
-    return new_coder
+    return tfp.distributions.Normal(coder.loc + auxiliary_sample, tf.sqrt(coder_var - auxiliary_var))
 
 
-# def get_conditional_target(target, coder, auxiliary_var, auxiliary_sample):
-#     target_var = square(target.scale)
-#     coder_var = square(coder.scale)
-#
-#     # Calculates q(Z | A_i) \propto q(A_i | Z)p(Z)
-#
-#     target_denominator = target_var * auxiliary_var + coder_var * (coder_var - auxiliary_var)
-#
-#     # Calculate the mean
-#     target_mean_numerator = auxiliary_sample * target_var * coder_var
-#     target_mean_numerator += (target.loc - coder.loc) * (coder_var - auxiliary_var) * coder_var
-#
-#     new_target_mean = coder.loc + target_mean_numerator / target_denominator
-#
-#     # Calculate the variance
-#     target_var_numerator = target_var * coder_var * (coder_var - auxiliary_var)
-#
-#     new_target_var = target_var_numerator / target_denominator
-#
-#     # Instantiate distributions
-#     new_target = tfd.Normal(loc=new_target_mean,
-#                             scale=tf.sqrt(new_target_var))
-#
-#     return new_target
-def get_conditional_target(target, coder, auxiliary_var, auxiliary_sample, eps=1e-7):
-    log_target_var = 2 * log(target.scale + eps)
-    log_coder_var = 2 * log(coder.scale + eps)
-    log_aux_var = log(auxiliary_var + eps)
-
-    # Calculates q(Z | A_i) \propto q(A_i | Z)p(Z)
-    log_target_denominator = log_add_exp(log_target_var + log_aux_var,
-                                         log_coder_var + log_sub_exp(log_coder_var, log_aux_var))
-
-    # Calculate the mean
-    target_mean_term_1 = auxiliary_sample * exp(log_target_var + log_coder_var - log_target_denominator)
-
-    log_target_mean_term_2 = log_sub_exp(log_coder_var, log_aux_var) + log_coder_var - log_target_denominator
-    target_mean_term_2 = (target.loc - coder.loc) * exp(log_target_mean_term_2)
-
-    new_target_mean = coder.loc + target_mean_term_1 + target_mean_term_2
-
-    # Calculate the variance
-    log_target_var_numerator = log_target_var + log_coder_var + log_sub_exp(log_coder_var,
-                                                                            log_aux_var)
-
-    log_new_target_var = log_target_var_numerator - log_target_denominator
-
-    # Instantiate distributions
-    new_target = tfd.Normal(loc=new_target_mean,
-                            scale=exp(0.5 * log_new_target_var))
-
-    return new_target
+def get_conditional_target(target, coder, auxiliary_var, auxiliary_sample):
+    coder_var = tf.math.pow(coder.scale, 2)
+    target_var = tf.math.pow(target.scale, 2)
+    new_t_mean = (coder.loc + (auxiliary_sample * target_var * coder_var +
+                               (target.loc - coder.loc) * (coder_var - auxiliary_var) * coder_var) /
+                  (target_var * auxiliary_var + coder_var * (coder_var - auxiliary_var)))
+    new_t_var = target_var * coder_var * (coder_var - auxiliary_var) / \
+        (auxiliary_var * target_var + coder_var * (coder_var - auxiliary_var))
+    return tfp.distributions.Normal(new_t_mean, tf.sqrt(new_t_var))
 
 
 class GaussianEncoder(Encoder):
-    AVAILABLE_SAMPLERS = {
-        "importance": ImportanceSampler,
-        "rejection": RejectionSampler
-    }
-
     def __init__(self,
-                 kl_per_partition=10.0,
-                 sampler="importance",
+                 kl_per_partition,
+                 sampler: Sampler,
                  name="gaussian_encoder",
                  **kwargs):
 
@@ -170,11 +104,7 @@ class GaussianEncoder(Encoder):
         # ---------------------------------------------------------------------
         # Assign parameters
         # ---------------------------------------------------------------------
-
-        if sampler not in self.AVAILABLE_SAMPLERS:
-            raise CodingError(f"Sampler must be one of {self.AVAILABLE_SAMPLERS}, but {sampler} was given!")
-
-        self.sampler = self.AVAILABLE_SAMPLERS[sampler]()
+        self.sampler = sampler
 
         self.kl_per_partition = tf.cast(kl_per_partition, tf.float32)
 
@@ -184,14 +114,13 @@ class GaussianEncoder(Encoder):
 
         # The auxiliary variables are always scaled w.r.t the coding distribution, i.e.
         # Var[A_i] = R_i * Var_{Z_i ~ P(Z_i)}[Z_i]
-        self.sum_aux_variable_variance_ratios = tf.Variable(tf.zeros([0], dtype=tf.float32),
-                                                            shape=(None,),
-                                                            name="sum_averaged_variance_ratios",
-                                                            trainable=False)
+        # The variance ratio at index i creates a chunk that has KL divergence 1/(i+1) times the overall KL divergence
+        self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
+                                                        name="sum_averaged_variance_ratios",
+                                                        trainable=False)
 
         # Counts over how many batch elements we averaged over
-        self.average_counts = tf.Variable(tf.zeros([0], dtype=tf.float32),
-                                          shape=(None,),
+        self.average_counts = tf.Variable(tf.constant([1.], dtype=tf.float32),
                                           name="average_counts",
                                           trainable=False)
 
@@ -199,19 +128,10 @@ class GaussianEncoder(Encoder):
                                         name="coder_initialized",
                                         trainable=False)
 
-    @property
-    def aux_variable_variance_ratios(self):
-        if self.average_counts is None:
-            raise CodingError("Coder must be initialized!")
-
-        # The first item is always undefined, since it is implicitly the same as the second item
-        return self.sum_aux_variable_variance_ratios / self.average_counts
-
     def update_auxiliary_variance_ratios(self,
                                          target_dist,
                                          coding_dist,
                                          relative_tolerance=1e-5,
-                                         absolute_tolerance=1e-4,
                                          max_iters=10000,
                                          learning_rate=0.03):
         print(f"Updating {self.name}!")
@@ -231,11 +151,22 @@ class GaussianEncoder(Encoder):
         # Calculate the number of required auxiliary variables for each batch element
         num_aux_variables = 1 + tf.cast(tf.math.floor(total_kl / self.kl_per_partition), tf.int32)
         max_num_variables = tf.reduce_max(num_aux_variables)
+        current_max = self.aux_variable_variance_ratios.shape[0]
 
-        sum_variance_ratios = np.zeros(max_num_variables, dtype=np.float32)
-        average_counts = np.zeros(max_num_variables, dtype=np.float32)
+        if max_num_variables > current_max:
+            aux_variable_variance_ratios_copy = tf.identity(self.aux_variable_variance_ratios)
+            self.aux_variable_variance_ratios = tf.Variable(tf.zeros((max_num_variables,), dtype=tf.float32),
+                                                            name="sum_averaged_variance_ratios",
+                                                            trainable=False)
+            self.aux_variable_variance_ratios[:current_max].assign(aux_variable_variance_ratios_copy)
 
-        # Perform intialization for each possible KL ratio
+            average_counts_copy = tf.identity(self.average_counts)
+            self.average_counts = tf.Variable(tf.zeros((max_num_variables,), dtype=tf.float32),
+                                              name="average_counts",
+                                              trainable=False)
+            self.average_counts[:current_max].assign(average_counts_copy)
+
+        # Perform initialization for each possible KL ratio
         for ratio in range(max_num_variables, 1, -1):
 
             # We will only update the distributions with high enough KL
@@ -255,17 +186,18 @@ class GaussianEncoder(Encoder):
             total_kl = tf.reduce_sum(tfd.kl_divergence(target, coder), axis=data_dims)
 
             # Initialize ratio parameters
-            init = 1. / ratio * np.ones(num_elements, dtype=np.float32)
-
-            if ratio < max_num_variables:
-                init = tf.maximum(tf.cast(sum_variance_ratios[ratio] / average_counts[ratio] - 0.1, tf.float32),
-                                  init)
+            if self.aux_variable_variance_ratios[ratio - 1] > 0.:
+                init = self.aux_variable_variance_ratios[ratio - 1]
+            elif ratio < max_num_variables:
+                init = self.aux_variable_variance_ratios[ratio]
+            else:
+                init = 1. / ratio
 
             init = sigmoid_inverse(init)
             reparameterized_aux_variable_var_ratio = tf.Variable(init)
 
             # Compensate in the learning rate for the increased loss
-            optimizer = tf.optimizers.Adam(learning_rate=learning_rate)
+            optimizer = tf.optimizers.SGD(learning_rate=learning_rate)
 
             # Optimize the current ratio using SGD
             prev_loss = np.inf
@@ -275,11 +207,7 @@ class GaussianEncoder(Encoder):
                     with tf.GradientTape() as tape:
                         aux_variable_variance_ratio = tf.nn.sigmoid(reparameterized_aux_variable_var_ratio)
 
-                        # We reshape, so that broadcasting works nice
-                        aux_variable_variance_ratio = tf.reshape(aux_variable_variance_ratio,
-                                                                 [-1] + [1] * (tf.rank(target_loc).numpy() - 1))
-
-                        auxiliary_variance = aux_variable_variance_ratio * coder.scale ** 2
+                        auxiliary_variance = aux_variable_variance_ratio * tf.math.pow(coder.scale, 2)
                         aux_target = get_auxiliary_target(target=target,
                                                           coder=coder,
                                                           auxiliary_var=auxiliary_variance)
@@ -292,27 +220,30 @@ class GaussianEncoder(Encoder):
                                                      axis=data_dims)
 
                         # Make a quadratic loss
-                        kl_loss = square(auxiliary_kl - total_kl / tf.cast(ratio, tf.float32))
-                        total_kl_loss = tf.reduce_mean(kl_loss)
+                        kl_loss = tf.math.pow(tf.reduce_mean(auxiliary_kl - total_kl / tf.cast(ratio, tf.float32)), 2)
 
-                    gradient = tape.gradient(total_kl_loss, reparameterized_aux_variable_var_ratio)
+                    gradient = tape.gradient(kl_loss, reparameterized_aux_variable_var_ratio)
                     optimizer.apply_gradients([(gradient, reparameterized_aux_variable_var_ratio)])
 
                     # Early stop if the loss decreases less than the tolerance
-                    if total_kl_loss < absolute_tolerance and \
-                            tf.abs(prev_loss - total_kl_loss) < relative_tolerance:
+                    if tf.abs(prev_loss - kl_loss) < relative_tolerance:
                         break
 
-                    prev_loss = total_kl_loss
-
-                    ratio_mean, ratio_var = tf.nn.moments(tf.reshape(aux_variable_variance_ratio, [-1]), axes=[0])
+                    prev_loss = kl_loss
 
                     progress_bar.set_description(f"Ratio {ratio}, {num_elements}/{target_loc.shape[0]} items - "
-                                                 f"avg ratio: {ratio_mean:.4f}+-{tf.sqrt(ratio_var):.4f}, "
-                                                 f"aux_kl_1: {auxiliary_kl[0]:.3f}, "
-                                                 f"target_kl_1: {(total_kl[0] / ratio):.3f}, "
-                                                 f"kl_1: {(total_kl[0]):.3f}, "
-                                                 f"loss: {total_kl_loss:.3f}")
+                                                 f"ratio: {aux_variable_variance_ratio:.4f}, "
+                                                 f"avg_aux_kl: {tf.reduce_mean(auxiliary_kl):.3f}+-{tf.math.reduce_std(auxiliary_kl):.3f}, "
+                                                 f"avg target_kl: {tf.reduce_mean(total_kl) / ratio:.3f}, "
+                                                 f"avg kl: {tf.reduce_mean(total_kl):.3f}, "
+                                                 f"loss: {kl_loss:.3f}")
+
+            self.aux_variable_variance_ratios[ratio - 1].assign(
+                (self.aux_variable_variance_ratios[ratio - 1] * self.average_counts[ratio - 1] +
+                 aux_variable_variance_ratio * num_elements) /
+                (self.average_counts[ratio - 1] + num_elements))
+            self.average_counts[ratio - 1].assign(self.average_counts[ratio - 1] + num_elements)
+            auxiliary_variance = self.aux_variable_variance_ratios[ratio - 1] * tf.math.pow(coder.scale, 2)
 
             # Once the optimization is finished, calculate the new target and coding distributions
             auxiliary_sample = aux_target.sample()
@@ -332,34 +263,6 @@ class GaussianEncoder(Encoder):
             coding_loc = tf.tensor_scatter_nd_update(coding_loc, indices, coder.loc)
             coding_scale = tf.tensor_scatter_nd_update(coding_scale, indices, coder.scale)
 
-            # Update the statistics we want to persist
-            sum_variance_ratios[ratio - 1] = tf.reduce_sum(aux_variable_variance_ratio).numpy()
-            average_counts[ratio - 1] = num_elements
-
-        # ---------------------------------------------------------------------
-        # Once we have the ratios, we concatenate them, and bind them to the encoder
-        # by creating variables
-        # ---------------------------------------------------------------------
-
-        # If the variables exist already, we combine them
-        num_stored_vars = self.average_counts.value().shape[0]
-
-        # If there are are more dimensions than we previously had, we need to extend our variables
-        if num_stored_vars < max_num_variables:
-            # Update the indices that exist
-            sum_variance_ratios[:num_stored_vars] += self.aux_variable_variance_ratios.numpy()
-            average_counts[:num_stored_vars] += self.average_counts.numpy()
-
-        # If the number of dimensions is fewer than we previously had, we do a simple update
-        else:
-            # Update the indices that exist
-            sum_variance_ratios += self.aux_variable_variance_ratios[:max_num_variables].numpy()
-            average_counts += self.average_counts[:max_num_variables].numpy()
-
-        # Assign values
-        self.average_counts.assign(average_counts)
-        self.sum_aux_variable_variance_ratios.assign(sum_variance_ratios)
-
         self._initialized.assign(True)
 
     def call(self, target_dist, coding_dist, seed):
@@ -368,21 +271,19 @@ class GaussianEncoder(Encoder):
             raise CodingError("Coder has not been initialized yet, please call initialize() first!")
 
         indices = []
-        aggregate_sample = 0.
 
         total_kl = tf.reduce_sum(tfd.kl_divergence(target_dist, coding_dist))
-        num_aux_variables = 1 + tf.cast(tf.math.floor(total_kl / self.kl_per_partition), tf.int32)
+        num_aux_variables = tf.cast(tf.math.ceil(total_kl / self.kl_per_partition), tf.int32)
 
         # If there are more auxiliary variables needed than what we are already storing, we update our estimates
         if num_aux_variables > self.average_counts.shape[0]:
-            print("More auxiliary variables required, updating internal statistics!")
-            self.update_auxiliary_variance_ratios(target_dist=target_dist,
-                                                  coding_dist=coding_dist)
+            raise CodingError("KL divergence higher than auxiliary variables can account for. "
+                              "Update auxiliary variable ratios with high-enough KL divergence.")
 
-        # We iterate from the second entry in the ratios, because the first entry is *implicitly*
-        # the same as the second, but in reality it is NaN!
+        # We iterate backward until the second entry in ratios. The first entry is 1.,
+        # in which case we just draw the final sample.
         for aux_variable_variance_ratio in self.aux_variable_variance_ratios[1:num_aux_variables][::-1]:
-            auxiliary_var = aux_variable_variance_ratio * coding_dist.scale ** 2
+            auxiliary_var = aux_variable_variance_ratio * tf.math.pow(coding_dist.scale, 2)
 
             auxiliary_target = get_auxiliary_target(target=target_dist,
                                                     coder=coding_dist,
@@ -391,22 +292,20 @@ class GaussianEncoder(Encoder):
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
 
-            index, sample = self.sampler.coded_sample(target=auxiliary_target,
-                                                      coder=auxiliary_coder,
-                                                      seed=seed)
+            index, auxiliary_sample = self.sampler.coded_sample(target=auxiliary_target,
+                                                                coder=auxiliary_coder,
+                                                                seed=seed)
 
             indices.append(index)
-
-            aggregate_sample = aggregate_sample + sample
 
             target_dist = get_conditional_target(target=target_dist,
                                                  coder=coding_dist,
                                                  auxiliary_var=auxiliary_var,
-                                                 auxiliary_sample=sample)
+                                                 auxiliary_sample=auxiliary_sample)
 
             coding_dist = get_conditional_coder(coder=coding_dist,
                                                 auxiliary_var=auxiliary_var,
-                                                auxiliary_sample=sample)
+                                                auxiliary_sample=auxiliary_sample)
 
         # Sample the last auxiliary variable
         index, sample = self.sampler.coded_sample(target=target_dist,
@@ -415,28 +314,18 @@ class GaussianEncoder(Encoder):
 
         indices.append(index)
 
-        aggregate_sample = aggregate_sample + sample
-
-        return indices, aggregate_sample
+        return indices, sample
 
 
 class GaussianDecoder(Decoder):
-    AVAILABLE_SAMPLERS = {
-        "importance": ImportanceSampler,
-        "rejection": RejectionSampler
-    }
-
     def __init__(self,
-                 sampler="importance",
+                 sampler: Sampler,
                  name="gaussian_decoder",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
 
-        if sampler not in self.AVAILABLE_SAMPLERS:
-            raise CodingError(f"Sampler must be one of {self.AVAILABLE_SAMPLERS}, but {sampler} was given!")
-
-        self.sampler = self.AVAILABLE_SAMPLERS[sampler]()
+        self.sampler = sampler
 
     def call(self, indices, seed, aux_variable_variance_ratios):
 

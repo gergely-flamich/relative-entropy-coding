@@ -2,7 +2,6 @@ import numpy as np
 import math
 import tensorflow as tf
 import tensorflow_probability as tfp
-from matplotlib import pyplot as plt
 
 from rec.coding.utils import CodingError
 
@@ -100,7 +99,7 @@ def gaussian_rejection_sample_small(t_dist,
         accepted_ind = tf.where(accepted > 0.)
         if accepted_ind.shape[0] > 0:
             index = int(accepted_ind[0, 0])
-            return samples[index], i + index
+            return i + index, samples[index]
         i += sample_buffer_size
 
     # If not finished in buffer, we accept anything above ratio r
@@ -111,97 +110,6 @@ def gaussian_rejection_sample_small(t_dist,
         accepted_ind = tf.where(sample_ratios > tf.math.log(r))
         if accepted_ind.shape[0] > 0:
             index = int(accepted_ind[0, 0])
-            return samples[index], i + index
+            return i + index, samples[index]
         else:
             i += sample_buffer_size
-
-
-# TODO: remove eventually
-def get_aux_distribution(t, p, aux_var):
-    p_var = tf.math.pow(p.scale, 2)
-    t_var = tf.math.pow(t.scale, 2)
-    ta_mean = (t.loc - p.loc) * aux_var / p_var
-    ta_var = t_var * tf.math.pow(aux_var, 2) / tf.math.pow(p_var, 2) + aux_var * (p_var - aux_var) / p_var
-    pa = tfp.distributions.Normal(loc=tf.zeros_like(ta_mean), scale=tf.sqrt(aux_var))
-    ta = tfp.distributions.Normal(loc=ta_mean, scale=tf.sqrt(ta_var))
-    return ta, pa
-
-
-# TODO: remove eventually
-def get_conditionals(t, p, aux_var, a):
-    p_var = tf.math.pow(p.scale, 2)
-    t_var = tf.math.pow(t.scale, 2)
-    new_t_mean = (p.loc + (a * t_var * p_var + (t.loc - p.loc) * (p_var - aux_var) * p_var) /
-               (t_var * aux_var + p_var * (p_var - aux_var)))
-    new_t_var = t_var * p_var * (p_var - aux_var) / (aux_var * t_var + p_var * (p_var - aux_var))
-    new_p = tfp.distributions.Normal(p.loc + a, tf.sqrt(p_var - aux_var))
-    new_t = tfp.distributions.Normal(new_t_mean, tf.sqrt(new_t_var))
-    return new_t, new_p
-
-
-# TODO: remove eventually
-def preprocessing_auxiliary_ratios(t_list, p_list, target_kl):
-    image_ratio_list = []
-    for t, p in zip(t_list, p_list):
-        n_aux = 1 + int(tf.reduce_sum(tfp.distributions.kl_divergence(t, p)) // target_kl)
-        ratio_list = []
-        aux_ratio_untransformed = tf.Variable(-2., trainable=True)
-        for i in range(n_aux, 1, -1):
-            kl = tf.reduce_sum(tfp.distributions.kl_divergence(t, p))
-            opt = tf.optimizers.SGD(learning_rate=0.001)
-            def get_loss():
-                aux_ratio = tf.math.sigmoid(aux_ratio_untransformed)
-                aux_var = aux_ratio * tf.math.pow(p.scale, 2)
-                ta, pa = get_aux_distribution(t, p, aux_var)
-                aux_kl = tf.reduce_sum(tfp.distributions.kl_divergence(ta, pa))
-                return tf.math.pow(aux_kl - kl / i, 2)
-            for _ in range(50 if i < n_aux else 500):
-                opt.minimize(get_loss, var_list=[aux_ratio_untransformed])
-
-            aux_ratio = tf.math.sigmoid(aux_ratio_untransformed)
-            aux_var = aux_ratio * tf.math.pow(p.scale, 2)
-            ta, pa = get_aux_distribution(t, p, aux_var)
-            aux_kl = tf.reduce_sum(tfp.distributions.kl_divergence(ta, pa))
-            print('{} aux_ratio={}, KL={}, Aux KL={}, ratio={}'.format(i, aux_ratio, kl, aux_kl, kl/aux_kl))
-            t, p = get_conditionals(t, p, aux_var, ta.sample())
-            ratio_list.append(float(aux_ratio))
-        ratio_list.reverse()
-        image_ratio_list.append(ratio_list)
-
-    average_ratios = np.zeros((max([len(l) for l in image_ratio_list]),))
-    denominator = np.zeros((max([len(l) for l in image_ratio_list]),))
-    for l in image_ratio_list:
-        average_ratios[:len(l)] += l
-        denominator[:len(l)] += 1
-        plt.plot(l, c='b')
-    average_ratios /= denominator
-    plt.plot(average_ratios, c='r')
-    plt.show()
-
-    return average_ratios
-
-
-# TODO: remove eventually
-def gaussian_rejection_sample_large(t_dist,
-                                    p_dist,
-                                    target_kl,
-                                    auxiliary_ratios,
-                                    sample_buffer_size,
-                                    r_buffer_size,
-                                    seed=42069):
-    kl = tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))
-    n_aux = 1 + int(kl // target_kl)
-    indicies = []
-    for aux_ratio in auxiliary_ratios[:n_aux - 1][::-1]:
-        print('KL={}, aux_ratio={}'.format(tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist)), aux_ratio))
-        aux_var = aux_ratio * tf.math.pow(p_dist.scale, 2)
-        ta, pa = get_aux_distribution(t_dist, p_dist, aux_var)
-        index, sample = gaussian_rejection_sample_small(ta, pa, sample_buffer_size, r_buffer_size, seed)
-        print('Sample found at {}'.format(index))
-        indicies.append(index)
-        t_dist, p_dist = get_conditionals(t_dist, p_dist, aux_var, sample)
-    index, sample = gaussian_rejection_sample_small(t_dist, p_dist, sample_buffer_size, r_buffer_size, seed)
-    indicies.append(index)
-    return sample, indicies
-
-

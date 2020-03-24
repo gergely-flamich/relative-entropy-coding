@@ -38,8 +38,8 @@ class TestRejectionSampling(unittest.TestCase):
                                                                              t_mass,
                                                                              p_mass,
                                                                              r_buffer_size=10000)
-        np.testing.assert_almost_equal(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5)
-        np.testing.assert_almost_equal(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5)
+        np.testing.assert_allclose(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5)
+        np.testing.assert_allclose(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5)
 
         log_ratios, t_mass, p_mass = get_t_p_mass(t, p, n_samples=2, oversampling=10)
         r_buffer, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size=100000, dtype=tf.float64)
@@ -47,8 +47,8 @@ class TestRejectionSampling(unittest.TestCase):
                                                                              t_mass,
                                                                              p_mass,
                                                                              r_buffer_size=100000)
-        np.testing.assert_almost_equal(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5)
-        np.testing.assert_almost_equal(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5)
+        np.testing.assert_allclose(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5)
+        np.testing.assert_allclose(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5)
 
 
 if __name__ == '__main__':
