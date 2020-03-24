@@ -246,10 +246,13 @@ class GaussianCoder(Coder):
 
         self._initialized.assign(True)
 
-    def encode(self, target_dist, coding_dist, seed):
+    def encode(self, target_dist, coding_dist, seed, update_sampler=False):
 
         if not self._initialized:
             raise CodingError("Coder has not been initialized yet, please call initialize() first!")
+
+        if target_dist.loc.shape[0] != 1:
+            raise CodingError("For encoding, batch size must be 1.")
 
         indices = []
 
@@ -273,6 +276,9 @@ class GaussianCoder(Coder):
 
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
+
+            if update_sampler:
+                self.sampler.update(auxiliary_target, auxiliary_coder)
 
             index, auxiliary_sample = self.sampler.coded_sample(target=auxiliary_target,
                                                                 coder=auxiliary_coder,

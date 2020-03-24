@@ -20,7 +20,9 @@ class TestCoder(unittest.TestCase):
         t = tfp.distributions.Normal(loc=tf.constant([[5.1]]), scale=tf.constant([[0.01]]))
         p = tfp.distributions.Normal(loc=tf.constant([[0.]]), scale=tf.constant([[1.]]))
 
-        indices, sample = encoder.encode(t, p, seed=69420)
+        indices, sample = encoder.encode(t, p, seed=69420, update_sampler=True)
+        codelength = sum([encoder.sampler.get_codelength(i) for i in indices])
+        self.assertGreater(codelength, 0.)
         reconstructed_sample = encoder.decode(indices, p, seed=69420)
         np.testing.assert_allclose(sample, reconstructed_sample)
 

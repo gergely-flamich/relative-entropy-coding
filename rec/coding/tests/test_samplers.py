@@ -35,8 +35,8 @@ class TestRejectionSampler(unittest.TestCase):
         p = tfp.distributions.Normal(loc=tf.constant([0.]), scale=tf.constant([1.]))
 
         index, sample = sampler.coded_sample(t, p, seed=42069)
-        sampler.update_sampler(t, p)
-        sampler.update_sampler(t, p)
+        sampler.update(t, p)
+        sampler.update(t, p)
         self.assertAlmostEqual(tf.reduce_sum(sampler.acceptance_probabilities) + sampler.spillover_probability, 1.)
         sampler.get_codelength(index)
 
