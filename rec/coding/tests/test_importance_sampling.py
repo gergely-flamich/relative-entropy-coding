@@ -1,5 +1,10 @@
-import pytest
+import unittest
+from rec.coding.importance_sampling import encode_gaussian_importance_sample
 
-def test_importance_sampling():
 
-    assert True == True
+class TestImportanceSampling(unittest.TestCase):
+    pass
+
+
+if __name__ == '__main__':
+    unittest.main()

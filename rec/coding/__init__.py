@@ -1,1 +1,1 @@
-from .coder import *
+from rec.coding.coder import Coder, GaussianCoder
