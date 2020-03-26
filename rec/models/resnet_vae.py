@@ -98,6 +98,7 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
         # Stuff for compression
         # ---------------------------------------------------------------------
+        # TODO: allow other samplers
         sampler = RejectionSampler(sample_buffer_size=10000, r_buffer_size=1000000)
         self.coder = GaussianCoder(sampler=sampler,
                                    kl_per_partition=kl_per_partition,
