@@ -98,6 +98,7 @@ def data_config():
 @data_ingredient.capture
 def load_dataset(tfds_name,
                  dataset_path,
+                 num_pixels,
                  split,
                  normalizer,
                  training_patch_size,
@@ -142,7 +143,7 @@ def load_dataset(tfds_name,
 
     ds = ds.map(prepare)
 
-    return ds
+    return ds, num_pixels
 
 
 def read_png(filename):

@@ -239,7 +239,6 @@ def train_resnet_vae(dataset,
                      drop_learning_rate_after_iter,
                      learning_rate_after_drop,
                      num_pixels,
-                     num_channels,
                      _log):
 
     # -------------------------------------------------------------------------
@@ -249,6 +248,8 @@ def train_resnet_vae(dataset,
     dataset = dataset.repeat()
     dataset = dataset.batch(batch_size)
     dataset = dataset.prefetch(num_prefetch)
+
+    num_channels = dataset_info["num_channels"]
 
     # -------------------------------------------------------------------------
     # Create model
@@ -310,6 +311,8 @@ def train_resnet_vae(dataset,
             # Linearly annealed beta
             if anneal:
                 current_beta = beta * tf.minimum(1., tf.cast(ckpt.step, tf.float32) / annealing_end)
+            else:
+                current_beta = beta
 
             loss = -log_likelihood + current_beta * kld
 
@@ -378,7 +381,7 @@ def train_resnet_vae(dataset,
 
 @ex.automain
 def train_model(model, _log):
-    dataset, num_pixels, num_channels, _ = load_dataset()
+    dataset, num_pixels = load_dataset()
 
     if model == "vae":
         _log.info("Training a regular VAE!")
@@ -387,5 +390,4 @@ def train_model(model, _log):
     elif model == "resnet_vae":
         _log.info("Training a ResNet VAE!")
         train_resnet_vae(dataset=dataset,
-                         num_pixels=num_pixels,
-                         num_channels=num_channels)
+                         num_pixels=num_pixels)
