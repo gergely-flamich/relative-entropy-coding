@@ -48,7 +48,7 @@ def data_config():
         test_split_name = "test"
 
     elif dataset_name == "imagenet32":
-        tfds_name = "downsampled_imagenet/32x32"
+        tfds_name = "downsampled_imagenet/32x32:1.0.0"
         dataset_path = f"{dataset_base_path}/imagenet32"
 
         normalizer = 256.
@@ -102,15 +102,12 @@ def load_dataset(tfds_name,
                  normalizer,
                  training_patch_size,
                  test_split_name):
-
     if split == "test":
         split = test_split_name
 
     # If we are loading Kodak or CLIC2019
     if tfds_name is None:
         with tf.device("/CPU:0"):
-
-
             files = glob.glob(f"{dataset_path}/{split}/*.png")
 
             if not files:

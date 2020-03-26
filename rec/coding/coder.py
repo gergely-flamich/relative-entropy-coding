@@ -13,14 +13,6 @@ from rec.coding.samplers import Sampler
 tfl = tf.keras.layers
 tfd = tfp.distributions
 
-square = tf.math.square
-# TODO these functions don't exist, fix please
-log_add_exp = None  # tfp.math.log_add_exp
-log_sub_exp = None  # tfp.math.log_sub_exp
-
-log = tf.math.log
-exp = tf.exp
-
 
 def sigmoid_inverse(x):
     if tf.reduce_any(x < 0.) or tf.reduce_any(x > 1.):
@@ -305,7 +297,7 @@ class GaussianCoder(Coder):
 
         return indices, sample
 
-    def decode(self, indices, coding_dist, seed):
+    def decode(self, coding_dist, indices, seed):
         num_aux_variables = len(indices)
 
         indices.reverse()
@@ -329,3 +321,6 @@ class GaussianCoder(Coder):
                                             sample_index=indices[0],
                                             seed=seed)
         return sample
+
+    def get_codelength(self, indicies):
+        return [self.sampler.get_codelength(i) for i in indicies]

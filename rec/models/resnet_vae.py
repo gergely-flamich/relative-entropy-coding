@@ -5,8 +5,9 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from .custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
-from rec.coding import Coder, GaussianCoder
+from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
+from rec.coding import GaussianCoder
+from rec.coding.samplers import RejectionSampler
 
 tfl = tf.keras.layers
 tfk = tf.keras
@@ -28,8 +29,8 @@ class BidirectionalResidualBlock(tfl.Layer):
                  kernel_size: Tuple[int, int] =(3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
-                 kl_per_partition = 10.0,
-                 name: str ="bidirectional_resnet_block",
+                 kl_per_partition=10.0,
+                 name: str = "bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
@@ -97,8 +98,10 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
         # Stuff for compression
         # ---------------------------------------------------------------------
-        self.encoder = GaussianCoder(kl_per_partition=kl_per_partition,
-                                     name=f"encoder_for_{self.name}")
+        sampler = RejectionSampler(sample_buffer_size=10000, r_buffer_size=1000000)
+        self.coder = GaussianCoder(sampler=sampler,
+                                   kl_per_partition=kl_per_partition,
+                                   name=f"encoder_for_{self.name}")
 
         # ---------------------------------------------------------------------
         # Initialization flag
@@ -256,7 +259,7 @@ class BidirectionalResidualBlock(tfl.Layer):
             if self.use_iaf:
                 self.infer_iaf_autoregressive_context = self.infer_iaf_autoregressive_context_conv(tensor)
 
-            # Calculate next set of deterministic feautres
+            # Calculate next set of deterministic features
             if not self.is_last:
                 tensor = self.infer_conv1(tensor)
                 tensor = tf.nn.elu(tensor)
@@ -333,13 +336,13 @@ class BidirectionalResidualBlock(tfl.Layer):
                 self.posterior = tfd.Normal(loc=self.posterior_loc,
                                             scale=self.posterior_scale)
 
-                indices, latent_code = self.encoder.encode(**encoder_args)
+                indices, latent_code = self.coder.encode(self.posterior, self.prior, **encoder_args)
 
             # -----------------------------------------------------------------
             # Decompression
             # -----------------------------------------------------------------
             if decoder_args is not None:
-                latent_code = self.decoder(**decoder_args)
+                latent_code = self.coder.decode(self.prior, **decoder_args)
 
             # Calculate next set of deterministic features for residual block
             tensor = self.gen_conv1(tensor)
@@ -361,9 +364,8 @@ class BidirectionalResidualBlock(tfl.Layer):
         return tensor
 
     def update_coders(self):
-        self.encoder.update_auxiliary_variance_ratios(target_dist=self.posterior,
-                                                      coding_dist=self.prior)
-
+        self.coder.update_auxiliary_variance_ratios(target_dist=self.posterior,
+                                                    coding_dist=self.prior)
 
     def posterior_log_prob(self, tensor):
         if self.use_iaf:
@@ -692,6 +694,13 @@ class BidirectionalResNetVAE(tfk.Model):
         reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
 
         return block_indices, reconstruction
+
+    def get_codelength(self, compressed_codes):
+        codelengths = []
+        for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
+            codelengths.append(resnet_block.coder.get_codelength(compressed_code))
+        return codelengths
+
 
     def decompress(self, compressed_codes, seed, lossless=True):
 

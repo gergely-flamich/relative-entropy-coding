@@ -13,7 +13,7 @@ from rec.models.resnet_vae import BidirectionalResNetVAE
 
 from datasets import data_ingredient, load_dataset
 
-tf.config.experimental.set_visible_devices([], 'GPU')
+# tf.config.experimental.set_visible_devices([], 'GPU')
 
 ex = Experiment("compression_performance", ingredients=[data_ingredient])
 
