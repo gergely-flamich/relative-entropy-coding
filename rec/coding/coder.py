@@ -89,11 +89,13 @@ class GaussianCoder(Coder):
         # Var[A_i] = R_i * Var_{Z_i ~ P(Z_i)}[Z_i]
         # The variance ratio at index i creates a chunk that has KL divergence 1/(i+1) times the overall KL divergence
         self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
+                                                        shape=tf.TensorShape([None]),
                                                         name="sum_averaged_variance_ratios",
                                                         trainable=False)
 
         # Counts over how many batch elements we averaged over
         self.average_counts = tf.Variable(tf.constant([1.], dtype=tf.float32),
+                                          shape=tf.TensorShape([None]),
                                           name="average_counts",
                                           trainable=False)
 
@@ -101,14 +103,26 @@ class GaussianCoder(Coder):
                                         name="coder_initialized",
                                         trainable=False)
 
+    def reset_auxiliary_variance_ratios(self):
+        self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
+                                                        shape=tf.TensorShape([None]),
+                                                        name="sum_averaged_variance_ratios",
+                                                        trainable=False)
+        self.average_counts = tf.Variable(tf.constant([1.], dtype=tf.float32),
+                                          shape=tf.TensorShape([None]),
+                                          name="average_counts",
+                                          trainable=False)
+        self._initialized = tf.Variable(False,
+                                        name="coder_initialized",
+                                        trainable=False)
+
     def update_auxiliary_variance_ratios(self,
                                          target_dist,
                                          coding_dist,
-                                         relative_tolerance=1e-5,
+                                         relative_tolerance=1e-4,
                                          max_iters=10000,
-                                         learning_rate=0.03):
+                                         learning_rate=0.001):
         print(f"Updating {self.name}!")
-
         # Gather distribution statistics
         target_loc = target_dist.loc
         target_scale = target_dist.scale
@@ -120,21 +134,23 @@ class GaussianCoder(Coder):
 
         # The first dimension is the "batch" dimension, so we preserve it
         total_kl = tf.reduce_sum(tfd.kl_divergence(target_dist, coding_dist), axis=data_dims)
-
         # Calculate the number of required auxiliary variables for each batch element
         num_aux_variables = 1 + tf.cast(tf.math.floor(total_kl / self.kl_per_partition), tf.int32)
         max_num_variables = tf.reduce_max(num_aux_variables)
-        current_max = self.aux_variable_variance_ratios.shape[0]
+        # get dynamic shape
+        current_max = tf.shape(self.aux_variable_variance_ratios)[0]
 
         if max_num_variables > current_max:
             aux_variable_variance_ratios_copy = tf.identity(self.aux_variable_variance_ratios)
             self.aux_variable_variance_ratios = tf.Variable(tf.zeros((max_num_variables,), dtype=tf.float32),
+                                                            shape=tf.TensorShape([None]),
                                                             name="sum_averaged_variance_ratios",
                                                             trainable=False)
             self.aux_variable_variance_ratios[:current_max].assign(aux_variable_variance_ratios_copy)
 
             average_counts_copy = tf.identity(self.average_counts)
             self.average_counts = tf.Variable(tf.zeros((max_num_variables,), dtype=tf.float32),
+                                              shape=tf.TensorShape([None]),
                                               name="average_counts",
                                               trainable=False)
             self.average_counts[:current_max].assign(average_counts_copy)
@@ -193,7 +209,15 @@ class GaussianCoder(Coder):
                                                      axis=data_dims)
 
                         # Make a quadratic loss
-                        kl_loss = tf.math.pow(tf.reduce_mean(auxiliary_kl - total_kl / tf.cast(ratio, tf.float32)), 2)
+                        # kl_loss = tf.reduce_mean(tf.math.pow(auxiliary_kl - total_kl / tf.cast(ratio, tf.float32), 2))
+                        # kl_loss = tf.reduce_mean(tf.math.pow(total_kl - auxiliary_kl - self.kl_per_partition * (ratio - 1), 2))
+                        aux_kl_loss = tf.where(auxiliary_kl > self.kl_per_partition,
+                                               tf.math.pow(auxiliary_kl - self.kl_per_partition, 2),
+                                               0.)
+                        remaining_kl_loss = tf.where(total_kl - auxiliary_kl > self.kl_per_partition * (ratio - 1),
+                                                     tf.math.pow((total_kl - auxiliary_kl) - self.kl_per_partition * (ratio - 1), 2),
+                                                     0.)
+                        kl_loss = tf.reduce_mean(aux_kl_loss + remaining_kl_loss)
 
                     gradient = tape.gradient(kl_loss, reparameterized_aux_variable_var_ratio)
                     optimizer.apply_gradients([(gradient, reparameterized_aux_variable_var_ratio)])

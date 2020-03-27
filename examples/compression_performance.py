@@ -120,21 +120,17 @@ def resnet_vae_initialize(dataset_info,
         model.swap_in_ema_variables()
 
     else:
+        # TODO fix shape mismatch
         model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
 
     # -------------------------------------------------------------------------
     # Set-up for compression
     # -------------------------------------------------------------------------
-    # TODO: remove this asap
-    count = 0
+    model.reset_coders()
     for images in dataset:
-        if count == 0:
-            count += 1
-            continue
+        # print(images)
         model.update_coders(images)
-        model.save_weights(f"{model_save_dir}/compressor_initialized")
-
-    print(f"Count was {count}")
+    model.save_weights(f"{model_save_dir}/compressor_initialized")
 
 
 @ex.capture
@@ -186,7 +182,7 @@ def resnet_vae_compress(model_config,
 
 @ex.automain
 def compress_data(model, mode, _log):
-    dataset = load_dataset(split="test")
+    dataset, _ = load_dataset(split="test")
 
     if model == "vae":
         _log.info("Testing MNIST VAE!")

@@ -247,7 +247,6 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         # First layer in block
         tensor = tf.nn.elu(tensor)
-
         # ---------------------------------------------------------------------
         # Inference pass
         # ---------------------------------------------------------------------
@@ -278,13 +277,12 @@ class BidirectionalResidualBlock(tfl.Layer):
 
             self.prior = tfd.Normal(loc=self.prior_loc,
                                     scale=self.prior_scale)
-
             # -----------------------------------------------------------------
             # Training
             # -----------------------------------------------------------------
 
             # If no latent code is provided, we need to create it
-            if encoder_args is None or decoder_args is None:
+            if encoder_args is None and decoder_args is None:
                 # Calculate second part of posterior statistics
                 self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
@@ -367,6 +365,9 @@ class BidirectionalResidualBlock(tfl.Layer):
     def update_coders(self):
         self.coder.update_auxiliary_variance_ratios(target_dist=self.posterior,
                                                     coding_dist=self.prior)
+
+    def reset_coders(self):
+        self.coder.reset_auxiliary_variance_ratios()
 
     def posterior_log_prob(self, tensor):
         if self.use_iaf:
@@ -655,13 +656,19 @@ class BidirectionalResNetVAE(tfk.Model):
 
     def update_coders(self, images):
         # To initialize the coders, we first perform a forward pass with the supplied images.
-        # This will set the posteriors and priors in the resicdual blocks
+        # This will set the posteriors and priors in the residual blocks
         self.call(images)
 
         for res_block in self.residual_blocks:
             res_block.update_coders()
 
         self._compressor_initialized.assign(True)
+
+    def reset_coders(self):
+        for res_block in self.residual_blocks:
+            res_block.reset_coders()
+
+        self._compressor_initialized.assign(False)
 
     def compress(self, image, seed, lossless=True):
 
