@@ -697,7 +697,7 @@ class BidirectionalResNetVAE(tfk.Model):
         reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
 
         # Discretized Logistic Likelihood
-        log_likelihood = self.likelihood_function(input, reconstruction)
+        log_likelihood = self.likelihood_function(image, reconstruction)
         self.log_likelihood = tf.reduce_mean(log_likelihood)
 
         return block_indices, reconstruction
