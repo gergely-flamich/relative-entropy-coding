@@ -103,19 +103,6 @@ class GaussianCoder(Coder):
                                         name="coder_initialized",
                                         trainable=False)
 
-    def reset_auxiliary_variance_ratios(self):
-        self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
-                                                        shape=tf.TensorShape([None]),
-                                                        name="sum_averaged_variance_ratios",
-                                                        trainable=False)
-        self.average_counts = tf.Variable(tf.constant([1.], dtype=tf.float32),
-                                          shape=tf.TensorShape([None]),
-                                          name="average_counts",
-                                          trainable=False)
-        self._initialized = tf.Variable(False,
-                                        name="coder_initialized",
-                                        trainable=False)
-
     def update_auxiliary_variance_ratios(self,
                                          target_dist,
                                          coding_dist,
@@ -273,12 +260,15 @@ class GaussianCoder(Coder):
         indices = []
 
         total_kl = tf.reduce_sum(tfd.kl_divergence(target_dist, coding_dist))
+        print('Encoding latent variable with KL={}'.format(total_kl))
         num_aux_variables = tf.cast(tf.math.ceil(total_kl / self.kl_per_partition), tf.int32)
 
         # If there are more auxiliary variables needed than what we are already storing, we update our estimates
-        if num_aux_variables > self.average_counts.shape[0]:
+        current_max = tf.shape(self.aux_variable_variance_ratios)[0]
+        if num_aux_variables > current_max:
             raise CodingError("KL divergence higher than auxiliary variables can account for. "
-                              "Update auxiliary variable ratios with high-enough KL divergence.")
+                              "Update auxiliary variable ratios with high-enough KL divergence."
+                              "Maximum possible KL divergence is {}.".format(current_max.numpy() * self.kl_per_partition))
 
         # We iterate backward until the second entry in ratios. The first entry is 1.,
         # in which case we just draw the final sample.
@@ -295,13 +285,15 @@ class GaussianCoder(Coder):
 
             if update_sampler:
                 self.sampler.update(auxiliary_target, auxiliary_coder)
-
-            index, auxiliary_sample = self.sampler.coded_sample(target=auxiliary_target,
-                                                                coder=auxiliary_coder,
-                                                                seed=seed)
+                auxiliary_sample = auxiliary_target.sample()
+                print('Sampler updated')
+            else:
+                index, auxiliary_sample = self.sampler.coded_sample(target=auxiliary_target,
+                                                                    coder=auxiliary_coder,
+                                                                    seed=seed)
+                print('Auxiliary sample found at index {}'.format(index))
+                indices.append(index)
             seed += 1
-
-            indices.append(index)
 
             target_dist = get_conditional_target(target=target_dist,
                                                  coder=coding_dist,
@@ -313,11 +305,16 @@ class GaussianCoder(Coder):
                                                 auxiliary_sample=auxiliary_sample)
 
         # Sample the last auxiliary variable
-        index, sample = self.sampler.coded_sample(target=target_dist,
-                                                  coder=coding_dist,
-                                                  seed=seed)
-
-        indices.append(index)
+        if update_sampler:
+            self.sampler.update(target_dist, coding_dist)
+            sample = target_dist.sample()
+            print('Sampler updated')
+        else:
+            index, sample = self.sampler.coded_sample(target=target_dist,
+                                                      coder=coding_dist,
+                                                      seed=seed)
+            print('Auxiliary sample found at index {}'.format(index))
+            indices.append(index)
 
         return indices, sample
 
@@ -347,4 +344,4 @@ class GaussianCoder(Coder):
         return sample
 
     def get_codelength(self, indicies):
-        return [self.sampler.get_codelength(i) for i in indicies]
+        return sum([self.sampler.get_codelength(i) for i in indicies])
