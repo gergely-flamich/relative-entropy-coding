@@ -186,7 +186,7 @@ def resnet_vae_compress(model_config,
 
 @ex.automain
 def compress_data(model, mode, _log):
-    dataset = load_dataset(split="test")
+    dataset, _ = load_dataset(split="test")
 
     if model == "vae":
         _log.info("Testing MNIST VAE!")
