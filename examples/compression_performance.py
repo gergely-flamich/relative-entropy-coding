@@ -20,12 +20,11 @@ ex = Experiment("compression_performance", ingredients=[data_ingredient])
 
 @ex.config
 def default_config(dataset_info):
-    # Can be "compress" or "initialize"
+    # Can be "compress" or "initialize" or "update_sampler"
     mode = "compress"
 
-    if mode == "compress":
-        num_test_images = 1
-
+    if mode == "compress" or mode == "update_sampler":
+         num_test_images = 1
     elif mode == "initialize":
         num_test_images = 300
         batch_size = 128
@@ -125,29 +124,23 @@ def resnet_vae_initialize(dataset_info,
     # -------------------------------------------------------------------------
     # Set-up for compression
     # -------------------------------------------------------------------------
-    # TODO: remove this asap
-    count = 0
     for images in dataset:
-        if count == 0:
-            count += 1
-            continue
         model.update_coders(images)
-        model.save_weights(f"{model_save_dir}/compressor_initialized")
-
-    print(f"Count was {count}")
+    model.save_weights(f"{model_save_dir}/compressor_initialized")
 
 
 @ex.capture
 def resnet_vae_compress(model_config,
                         model_save_dir,
                         num_test_images,
+                        update_sampler,
                         dataset,
                         dataset_info,
                         _log):
     # -------------------------------------------------------------------------
     # Batch the dataset
     # -------------------------------------------------------------------------
-    dataset = dataset.batch(num_test_images).take(1)
+    dataset = dataset.batch(1).take(num_test_images)
 
     # -------------------------------------------------------------------------
     # Create model
@@ -181,7 +174,14 @@ def resnet_vae_compress(model_config,
     # Compress images
     # -------------------------------------------------------------------------
     for images in dataset:
-        block_indices, reconstruction = model.compress(images, seed=42)
+        block_indices, reconstruction = model.compress(images, update_sampler=update_sampler, seed=42)
+        if not update_sampler:
+            print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
+            print("Codelength={}, residuals={}".format(model.get_codelength(block_indices), -model.log_likelihood))
+    if update_sampler:
+        model.save_weights(f"{model_save_dir}/compressor_initialized")
+
+
 
 
 @ex.automain
@@ -195,9 +195,11 @@ def compress_data(model, mode, _log):
     elif model == "resnet_vae":
         if mode == "compress":
             _log.info("Compressing using a ResNet VAE!")
-            resnet_vae_compress(dataset=dataset)
-
+            resnet_vae_compress(dataset=dataset, update_sampler=False)
         elif mode == "initialize":
             _log.info("Initializing compressors for a ResNet VAE!")
             resnet_vae_initialize(dataset=dataset)
+        elif mode == "update_sampler":
+            _log.info("Updating sampler for a ResNet VAE!")
+            resnet_vae_compress(dataset=dataset, update_sampler=True)
 

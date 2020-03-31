@@ -29,7 +29,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                  kernel_size: Tuple[int, int] =(3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
-                 kl_per_partition=10.0,
+                 kl_per_partition = 8.,
                  name: str = "bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
@@ -247,7 +247,6 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         # First layer in block
         tensor = tf.nn.elu(tensor)
-
         # ---------------------------------------------------------------------
         # Inference pass
         # ---------------------------------------------------------------------
@@ -278,13 +277,12 @@ class BidirectionalResidualBlock(tfl.Layer):
 
             self.prior = tfd.Normal(loc=self.prior_loc,
                                     scale=self.prior_scale)
-
             # -----------------------------------------------------------------
             # Training
             # -----------------------------------------------------------------
 
             # If no latent code is provided, we need to create it
-            if encoder_args is None or decoder_args is None:
+            if encoder_args is None and decoder_args is None:
                 # Calculate second part of posterior statistics
                 self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
@@ -336,7 +334,6 @@ class BidirectionalResidualBlock(tfl.Layer):
                 # The loc and scale are automagically calculated using property methods
                 self.posterior = tfd.Normal(loc=self.posterior_loc,
                                             scale=self.posterior_scale)
-
                 indices, latent_code = self.coder.encode(self.posterior, self.prior, **encoder_args)
 
             # -----------------------------------------------------------------
@@ -405,6 +402,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  deterministic_filters=160,
                  stochastic_filters=32,
                  use_iaf=False,
+                 kl_per_partition=8.,
                  latent_size="variable",
                  ema_decay=0.999,
                  name="resnet_vae",
@@ -435,6 +433,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
         self.use_iaf = use_iaf
 
+        self.kl_per_partition = kl_per_partition
         # Decay for exponential moving average update to variables
         self.ema_decay = tf.cast(ema_decay, tf.float32)
 
@@ -466,6 +465,7 @@ class BidirectionalResNetVAE(tfk.Model):
                                                            kernel_size=self.kernel_size,
                                                            is_last=res_block_idx == 0,  # Declare last residual block
                                                            use_iaf=self.use_iaf,
+                                                           kl_per_partition=self.kl_per_partition,
                                                            name=f"resnet_block_{res_block_idx}")
                                 for res_block_idx in range(self.num_res_blocks)]
 
@@ -655,7 +655,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
     def update_coders(self, images):
         # To initialize the coders, we first perform a forward pass with the supplied images.
-        # This will set the posteriors and priors in the resicdual blocks
+        # This will set the posteriors and priors in the residual blocks
         self.call(images)
 
         for res_block in self.residual_blocks:
@@ -663,7 +663,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
         self._compressor_initialized.assign(True)
 
-    def compress(self, image, seed, lossless=True):
+    def compress(self, image, seed, update_sampler=False):
 
         if not self._compressor_initialized:
             raise ModelError("The compressor hasn't been initialized yet!")
@@ -686,7 +686,9 @@ class BidirectionalResNetVAE(tfk.Model):
 
         block_indices = []
         for resnet_block in self.residual_blocks:
-            indices, tensor = resnet_block(tensor, inference_pass=False, encoder_args={"seed": seed})
+            indices, tensor = resnet_block(tensor,
+                                           inference_pass=False,
+                                           encoder_args={"seed": seed, "update_sampler":update_sampler})
 
             block_indices.append(indices)
 
@@ -694,13 +696,17 @@ class BidirectionalResNetVAE(tfk.Model):
         reconstruction = self.last_gen_conv(reconstruction)
         reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
 
+        # Discretized Logistic Likelihood
+        log_likelihood = self.likelihood_function(image, reconstruction)
+        self.log_likelihood = tf.reduce_mean(log_likelihood)
+
         return block_indices, reconstruction
 
     def get_codelength(self, compressed_codes):
-        codelengths = []
+        codelength = 0.
         for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
-            codelengths.append(resnet_block.coder.get_codelength(compressed_code))
-        return codelengths
+            codelength += resnet_block.coder.get_codelength(compressed_code)
+        return codelength
 
 
     def decompress(self, compressed_codes, seed, lossless=True):
