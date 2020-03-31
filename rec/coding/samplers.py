@@ -46,6 +46,16 @@ class Sampler(tf.Module, abc.ABC):
         :return:
         """
 
+    @abc.abstractmethod
+    def get_codelength(self, index):
+        pass
+
+    @abc.abstractmethod
+    def update(self,
+               target: tfd.Distribution,
+               coder: tfd.Distribution):
+        pass
+
 
 class ImportanceSampler(Sampler):
 
@@ -74,6 +84,14 @@ class ImportanceSampler(Sampler):
                                                  p_scale=coder.scale,
                                                  index=sample_index,
                                                  seed=seed)
+
+    def update(self,
+               target: tfd.Distribution,
+               coder: tfd.Distribution):
+        print("ImportanceSampler doesn't require updating!")
+
+    def get_codelength(self, index):
+        raise NotImplementedError
 
 
 class RejectionSampler(Sampler):

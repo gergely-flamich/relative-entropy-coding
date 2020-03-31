@@ -7,7 +7,7 @@ import tensorflow_probability as tfp
 
 from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
 from rec.coding import GaussianCoder
-from rec.coding.samplers import RejectionSampler
+from rec.coding.samplers import RejectionSampler, ImportanceSampler
 
 tfl = tf.keras.layers
 tfk = tf.keras
@@ -26,6 +26,7 @@ class BidirectionalResidualBlock(tfl.Layer):
     def __init__(self,
                  stochastic_filters: int,
                  deterministic_filters: int,
+                 sampler: str,
                  kernel_size: Tuple[int, int] =(3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
@@ -98,9 +99,19 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
         # Stuff for compression
         # ---------------------------------------------------------------------
-        # TODO: allow other samplers
-        sampler = RejectionSampler(sample_buffer_size=10000, r_buffer_size=1000000)
-        self.coder = GaussianCoder(sampler=sampler,
+        if sampler == "rejection":
+            s = RejectionSampler(sample_buffer_size=10000, r_buffer_size=1000000)
+
+        elif sampler == "importance":
+            # Setting alpha=inf will select the sample with
+            # the best importance weights
+            s = ImportanceSampler(alpha=np.inf)
+
+        else:
+            raise ModelError("Sampler must be one of ['rejection', 'importance'],"
+                             f"but got {sampler}!")
+
+        self.coder = GaussianCoder(sampler=s,
                                    kl_per_partition=kl_per_partition,
                                    name=f"encoder_for_{self.name}")
 
@@ -393,6 +404,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
     def __init__(self,
                  num_res_blocks,
+                 sampler,
                  likelihood_function="discretized_logistic",
                  learn_likelihood_scale=True,
                  first_kernel_size=(5, 5),
@@ -413,6 +425,8 @@ class BidirectionalResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         # Assign hyperparamteres
         # ---------------------------------------------------------------------
+        self.sampler_name = str(sampler)
+
         self.num_res_blocks = num_res_blocks
 
         self.learn_likelihood_scale = learn_likelihood_scale
@@ -462,6 +476,7 @@ class BidirectionalResNetVAE(tfk.Model):
         # And residual_blocks[-1] will have the top-most one, the output of which should be passed to last_gen_conv
         self.residual_blocks = [BidirectionalResidualBlock(stochastic_filters=self.stochastic_filters,
                                                            deterministic_filters=self.deterministic_filters,
+                                                           sampler=self.sampler_name,
                                                            kernel_size=self.kernel_size,
                                                            is_last=res_block_idx == 0,  # Declare last residual block
                                                            use_iaf=self.use_iaf,
