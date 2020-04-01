@@ -35,7 +35,7 @@ def default_config(dataset_info):
     # Model configurations
     model_save_base_dir = "/scratch/gf332/models/relative-entropy-coding"
 
-    model = "vae"
+    model = "resnet_vae"
 
     lossy = False
 
@@ -44,7 +44,7 @@ def default_config(dataset_info):
         target_bpp = 0.3
 
         # Start adjusting Beta after the given number of iterations
-        adjust_beta_after_iters = 30000
+        adjust_beta_after_iters = 50000
 
     if model == "vae":
         latent_size = 50
@@ -68,6 +68,7 @@ def default_config(dataset_info):
         learn_likelihood_scale = True
 
         model_config = {
+	    "sampler": "importance",
             "use_iaf": use_iaf,
             "latent_size": "variable",
             "num_res_blocks": num_res_blocks,
@@ -95,7 +96,7 @@ def default_config(dataset_info):
     # ELBO related stuff
     beta = 1.
     anneal = False
-    annealing_end = 150000  # Steps after which beta is fixed
+    annealing_end = 50000  # Steps after which beta is fixed
     drop_learning_rate_after_iter = 1500000
     learning_rate_after_drop = 1e-5
 

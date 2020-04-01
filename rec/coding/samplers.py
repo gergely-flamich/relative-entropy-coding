@@ -64,6 +64,13 @@ class ImportanceSampler(Sampler):
                          **kwargs)
 
         self.alpha = alpha
+        self.total_codelength = 0.
+
+    def reset_codelength(self):
+        self.total_codelength = 0.
+
+    def increase_codelength(self, bits):
+        self.total_codelength += bits
 
     def coded_sample(self,
                      target: tfd.Distribution,

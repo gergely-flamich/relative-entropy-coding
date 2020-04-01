@@ -8,7 +8,7 @@ import numpy as np
 from tqdm import trange
 
 from rec.coding.utils import CodingError
-from rec.coding.samplers import Sampler
+from rec.coding.samplers import Sampler, RejectionSampler, ImportanceSampler
 
 tfl = tf.keras.layers
 tfd = tfp.distributions
@@ -252,10 +252,13 @@ class GaussianCoder(Coder):
     def encode(self, target_dist, coding_dist, seed, update_sampler=False):
 
         if not self._initialized:
-            raise CodingError("Coder has not been initialized yet, please call initialize() first!")
+            raise CodingError("Coder has not been initialized yet, please call update_auxiliary_variance_ratios() first!")
 
         if target_dist.loc.shape[0] != 1:
             raise CodingError("For encoding, batch size must be 1.")
+
+        if isinstance(self.sampler, ImportanceSampler):
+            self.sampler.reset_codelength()
 
         indices = []
 
@@ -283,6 +286,12 @@ class GaussianCoder(Coder):
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
 
+            if isinstance(self.sampler, ImportanceSampler):
+                self.sampler.increase_codelength(
+                    tf.math.ceil(tf.reduce_sum(tfd.kl_divergence(auxiliary_target,
+                                                                 auxiliary_coder)))
+                )
+
             if update_sampler:
                 self.sampler.update(auxiliary_target, auxiliary_coder)
                 auxiliary_sample = auxiliary_target.sample()
@@ -291,7 +300,7 @@ class GaussianCoder(Coder):
                 index, auxiliary_sample = self.sampler.coded_sample(target=auxiliary_target,
                                                                     coder=auxiliary_coder,
                                                                     seed=seed)
-                print('Auxiliary sample found at index {}'.format(index))
+                print(f'Auxiliary sample {i} found at index {index}')
                 indices.append(index)
             seed += 1
 
@@ -344,4 +353,9 @@ class GaussianCoder(Coder):
         return sample
 
     def get_codelength(self, indicies):
-        return sum([self.sampler.get_codelength(i) for i in indicies])
+        if isinstance(self.sampler, RejectionSampler):
+            return sum([self.sampler.get_codelength(i) for i in indicies])
+        elif isinstance(self.sampler, ImportanceSampler):
+            return self.sampler.total_codelength
+        else:
+            raise NotImplementedError
