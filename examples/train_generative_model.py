@@ -15,6 +15,8 @@ from datasets import data_ingredient, load_dataset
 tfs = tf.summary
 tfd = tfp.distributions
 
+log_2 = tf.math.log(2.)
+
 ex = Experiment('train_generative_model', ingredients=[data_ingredient])
 
 
@@ -34,6 +36,15 @@ def default_config(dataset_info):
     model_save_base_dir = "/scratch/gf332/models/relative-entropy-coding"
 
     model = "vae"
+
+    lossy = False
+
+    if lossy:
+        # Average Bits per pixel
+        target_bpp = 0.3
+
+        # Start adjusting Beta after the given number of iterations
+        adjust_beta_after_iters = 30000
 
     if model == "vae":
         latent_size = 50
@@ -239,7 +250,11 @@ def train_resnet_vae(dataset,
                      drop_learning_rate_after_iter,
                      learning_rate_after_drop,
                      num_pixels,
-                     _log):
+                     _log,
+                     lossy,
+                     target_bpp=None,
+                     adjust_beta_after_iters = None):
+
 
     # -------------------------------------------------------------------------
     # Prepare the dataset
@@ -266,12 +281,14 @@ def train_resnet_vae(dataset,
     for first_pass in dataset.take(1):
         model(first_pass)
 
+    beta = tf.Variable(beta, dtype=tf.float32, name="beta")
     # -------------------------------------------------------------------------
     # Create Checkpoints
     # -------------------------------------------------------------------------
     ckpt = tf.train.Checkpoint(step=tf.Variable(1, dtype=tf.int64),
                                learn_rate=learn_rate,
                                model=model,
+                               beta=beta,
                                optimizer=optimizer)
 
     manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=3)
@@ -308,11 +325,21 @@ def train_resnet_vae(dataset,
             log_likelihood = model.log_likelihood
             kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
 
+            bpp = kld / (num_pixels * log_2)
+            if lossy and int(ckpt.step) > adjust_beta_after_iters:
+                if bpp > target_bpp + 1e-2:
+                    beta.assign(beta * 1.001)
+
+                elif bpp < target_bpp - 1e-2:
+                    beta.assign(beta / 1.001)
+
             # Linearly annealed beta
             if anneal:
                 current_beta = beta * tf.minimum(1., tf.cast(ckpt.step, tf.float32) / annealing_end)
             else:
                 current_beta = beta
+
+
 
             loss = -log_likelihood + current_beta * kld
 
@@ -329,8 +356,6 @@ def train_resnet_vae(dataset,
             # Save model
             save_path = manager.save()
             _log.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
-
-            log_2 = tf.math.log(2.)
 
             true_kl = model.kl_divergence(empirical=True, minimum_kl=0.)
             true_elbo = log_likelihood - kld
