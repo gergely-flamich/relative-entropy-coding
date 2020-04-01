@@ -8,6 +8,7 @@ import numpy as np
 
 from rec.coding.importance_sampling import encode_gaussian_importance_sample, decode_gaussian_importance_sample
 from rec.coding.rejection_sampling import gaussian_rejection_sample_small, get_r_pstar, get_t_p_mass
+from rec.coding.sample_generator import NaiveSampleGenerator, PseudoSampleGenerator
 
 tfd = tfp.distributions
 
@@ -78,12 +79,16 @@ class ImportanceSampler(Sampler):
 
 class RejectionSampler(Sampler):
 
-    def __init__(self, sample_buffer_size, r_buffer_size, name="rejection_sampler", **kwargs):
+    def __init__(self, sample_buffer_size, r_buffer_size, use_pseudo_sampler=False, name="rejection_sampler", **kwargs):
         super().__init__(name=name,
                          **kwargs)
 
         self.sample_buffer_size = sample_buffer_size
         self.r_buffer_size = r_buffer_size
+        if use_pseudo_sampler:
+            self.sample_generator = PseudoSampleGenerator(sample_buffer_size)
+        else:
+            self.sample_generator = NaiveSampleGenerator(sample_buffer_size)
 
         # Counts over how many batch elements we averaged over
         self.average_count = tf.Variable(tf.constant(0., dtype=tf.float64),
@@ -136,13 +141,13 @@ class RejectionSampler(Sampler):
                                                p_dist=coder,
                                                sample_buffer_size=self.sample_buffer_size,
                                                r_buffer_size=self.r_buffer_size,
+                                               sample_generator=self.sample_generator,
                                                seed=seed)
 
     def decode_sample(self,
                       coder: tfd.Distribution,
                       sample_index: tf.int64,
                       seed: tf.int64) -> tf.Tensor:
-        tf.random.set_seed(seed)
-        buffer_seed = seed + sample_index // self.sample_buffer_size
-        buffer = coder.sample((self.sample_buffer_size,), seed=buffer_seed)
-        return buffer[sample_index % self.sample_buffer_size]
+        return self.sample_generator.generate_index(sample_index % self.sample_buffer_size,
+                                                    coder,
+                                                    seed=seed + sample_index // self.sample_buffer_size)
