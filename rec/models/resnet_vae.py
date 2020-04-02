@@ -27,6 +27,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                  stochastic_filters: int,
                  deterministic_filters: int,
                  sampler: str,
+                 sampler_args: dict = {},
                  kernel_size: Tuple[int, int] =(3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
@@ -100,12 +101,12 @@ class BidirectionalResidualBlock(tfl.Layer):
         # Stuff for compression
         # ---------------------------------------------------------------------
         if sampler == "rejection":
-            s = RejectionSampler(sample_buffer_size=10000, r_buffer_size=1000000)
+            s = RejectionSampler(**sampler_args)
 
         elif sampler == "importance":
             # Setting alpha=inf will select the sample with
             # the best importance weights
-            s = ImportanceSampler(alpha=np.inf)
+            s = ImportanceSampler(**sampler_args)
 
         else:
             raise ModelError("Sampler must be one of ['rejection', 'importance'],"
@@ -405,6 +406,7 @@ class BidirectionalResNetVAE(tfk.Model):
     def __init__(self,
                  num_res_blocks,
                  sampler,
+                 sampler_args={},
                  likelihood_function="discretized_logistic",
                  learn_likelihood_scale=True,
                  first_kernel_size=(5, 5),
@@ -477,6 +479,7 @@ class BidirectionalResNetVAE(tfk.Model):
         self.residual_blocks = [BidirectionalResidualBlock(stochastic_filters=self.stochastic_filters,
                                                            deterministic_filters=self.deterministic_filters,
                                                            sampler=self.sampler_name,
+                                                           sampler_args=sampler_args,
                                                            kernel_size=self.kernel_size,
                                                            is_last=res_block_idx == 0,  # Declare last residual block
                                                            use_iaf=self.use_iaf,

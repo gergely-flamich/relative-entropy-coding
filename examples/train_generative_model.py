@@ -41,7 +41,7 @@ def default_config(dataset_info):
 
     if lossy:
         # Average Bits per pixel
-        target_bpp = 0.3
+        target_bpp = 0.1
 
         # Start adjusting Beta after the given number of iterations
         adjust_beta_after_iters = 50000
@@ -67,8 +67,14 @@ def default_config(dataset_info):
         likelihood_function = "discretized_logistic"
         learn_likelihood_scale = True
 
+        sampler_args = {
+            "alpha": float('inf'),
+            "coding_bits": 10,
+        }
+
         model_config = {
-	    "sampler": "importance",
+	        "sampler": "importance",
+            "sampler_args": sampler_args,
             "use_iaf": use_iaf,
             "latent_size": "variable",
             "num_res_blocks": num_res_blocks,
@@ -78,13 +84,15 @@ def default_config(dataset_info):
             "learn_likelihood_scale": learn_likelihood_scale
         }
 
+
+
         learning_rate = 1e-3
         lamb = 0.1
         beta = 1.
 
         model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
                          f"/{'iaf' if use_iaf else 'gaussian'}/blocks_{num_res_blocks}/" \
-                         f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
+                         f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}_target_bpp_{target_bpp:.3f}"
 
     # Training-time configurations
     iters = 3000000

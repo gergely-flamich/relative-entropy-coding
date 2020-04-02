@@ -36,9 +36,23 @@ def default_config(dataset_info):
 
     train_dataset = "imagenet32"
 
-    sampler = "rejection"
-
     kl_per_partition = 10.0
+
+    sampler = "rejection"
+    sampler_args = {}
+
+    if sampler == "rejection":
+        sampler_args = {
+            "sample_buffer_size": 10000,
+            "r_buffer_size": 1000000
+        }
+
+    elif sampler == "importance":
+        sampler_args = {
+            "alpha": np.inf,
+            "coding_bits": kl_per_partition / np.log(2),
+
+        }
 
     if model == "vae":
         latent_size = 50
@@ -66,6 +80,7 @@ def default_config(dataset_info):
             "deterministic_filters": 160,
             "stochastic_filters": 32,
             "sampler": sampler,
+            "sampler_args": sampler_args,
         }
 
         lamb = 0.1

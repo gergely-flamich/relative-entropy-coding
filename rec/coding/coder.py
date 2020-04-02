@@ -257,9 +257,6 @@ class GaussianCoder(Coder):
         if target_dist.loc.shape[0] != 1:
             raise CodingError("For encoding, batch size must be 1.")
 
-        if isinstance(self.sampler, ImportanceSampler):
-            self.sampler.reset_codelength()
-
         indices = []
 
         total_kl = tf.reduce_sum(tfd.kl_divergence(target_dist, coding_dist))
@@ -285,12 +282,6 @@ class GaussianCoder(Coder):
 
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
-
-            if isinstance(self.sampler, ImportanceSampler):
-                self.sampler.increase_codelength(
-                    tf.math.ceil(tf.reduce_sum(tfd.kl_divergence(auxiliary_target,
-                                                                 auxiliary_coder)))
-                )
 
             if update_sampler:
                 self.sampler.update(auxiliary_target, auxiliary_coder)
@@ -353,9 +344,4 @@ class GaussianCoder(Coder):
         return sample
 
     def get_codelength(self, indicies):
-        if isinstance(self.sampler, RejectionSampler):
-            return sum([self.sampler.get_codelength(i) for i in indicies])
-        elif isinstance(self.sampler, ImportanceSampler):
-            return self.sampler.total_codelength
-        else:
-            raise NotImplementedError
+        return sum([self.sampler.get_codelength(i) for i in indicies])
