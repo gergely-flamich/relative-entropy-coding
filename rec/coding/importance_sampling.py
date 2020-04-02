@@ -10,13 +10,16 @@ def encode_gaussian_importance_sample(t_loc,
                                       t_scale,
                                       p_loc,
                                       p_scale,
+                                      coding_bits,
                                       seed,
-                                      alpha=1.):
+                                      log_weighting_fn=None,
+                                      alpha=float('inf')):
     """
     Encodes a single sample from a Gaussian target distribution using another Gaussian coding distribution.
     Note that the runtime of this function is O(e^KL(q || p)), hence it is the job of the caller to potentially
     partition a larger Gaussian into smaller codable chunks.
 
+    :param coding_bits: number of bits to use to code each sample
     :param t_loc: location parameter of the target Gaussian
     :param t_scale: scale parameter of the target Gaussian
     :param p_loc: location parameter of the coding/proposal Gaussian
@@ -44,19 +47,18 @@ def encode_gaussian_importance_sample(t_loc,
     proposal = tfd.Normal(loc=tf.zeros_like(p_loc),
                           scale=tf.ones_like(p_scale))
 
-    # Get the total KL divergence
-    kl = tf.reduce_sum(tfd.kl_divergence(target, proposal))
-    kl = kl + (2. if kl < 5. else 0.)
-
     # We need to draw approximately e^KL samples to be guaranteed a low bias sample
-    num_samples = tf.cast(tf.math.ceil(tf.exp(kl)), tf.int32)
+    num_samples = tf.cast(tf.math.ceil(tf.exp(coding_bits * tf.math.log(2.))), tf.int32)
 
     # Draw e^KL samples
     samples = proposal.sample(num_samples)
 
     # Calculate the log-unnormalized importance_weights
-    log_importance_weights = tf.reduce_sum(target.log_prob(samples) - proposal.log_prob(samples),
-                                           axis=range(1, tf.rank(t_loc) + 1))
+    if log_weighting_fn is None:
+        log_importance_weights = tf.reduce_sum(target.log_prob(samples) - proposal.log_prob(samples),
+                                               axis=range(1, tf.rank(t_loc) + 1))
+    else:
+        log_importance_weights = log_weighting_fn(samples)
 
     # If we are using the infinity norm, we can just take the argmax as a shortcut
     if tf.math.is_inf(alpha):
