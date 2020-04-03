@@ -47,14 +47,29 @@ class Sampler(tf.Module, abc.ABC):
         :return:
         """
 
+    @abc.abstractmethod
+    def get_codelength(self, index):
+        pass
+
+    @abc.abstractmethod
+    def update(self,
+               target: tfd.Distribution,
+               coder: tfd.Distribution):
+        pass
+
 
 class ImportanceSampler(Sampler):
 
-    def __init__(self, alpha=np.inf, name="importance_sampler", **kwargs):
+    def __init__(self,
+                 coding_bits,
+                 alpha=np.inf,
+                 name="importance_sampler",
+                 **kwargs):
         super().__init__(name=name,
                          **kwargs)
 
         self.alpha = alpha
+        self.coding_bits = coding_bits
 
     def coded_sample(self,
                      target: tfd.Distribution,
@@ -64,6 +79,7 @@ class ImportanceSampler(Sampler):
                                                  t_scale=target.scale,
                                                  p_loc=coder.loc,
                                                  p_scale=coder.scale,
+                                                 coding_bits=self.coding_bits,
                                                  seed=seed,
                                                  alpha=self.alpha)
 
@@ -75,6 +91,14 @@ class ImportanceSampler(Sampler):
                                                  p_scale=coder.scale,
                                                  index=sample_index,
                                                  seed=seed)
+
+    def update(self,
+               target: tfd.Distribution,
+               coder: tfd.Distribution):
+        print("ImportanceSampler doesn't require updating!")
+
+    def get_codelength(self, index):
+        return self.coding_bits
 
 
 class RejectionSampler(Sampler):

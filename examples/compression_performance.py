@@ -13,7 +13,7 @@ from rec.models.resnet_vae import BidirectionalResNetVAE
 
 from datasets import data_ingredient, load_dataset
 
-# tf.config.experimental.set_visible_devices([], 'GPU')
+tf.config.experimental.set_visible_devices([], 'GPU')
 
 ex = Experiment("compression_performance", ingredients=[data_ingredient])
 
@@ -24,7 +24,7 @@ def default_config(dataset_info):
     mode = "compress"
 
     if mode == "compress" or mode == "update_sampler":
-         num_test_images = 1
+        num_test_images = 1
     elif mode == "initialize":
         num_test_images = 300
         batch_size = 128
@@ -34,15 +34,32 @@ def default_config(dataset_info):
 
     model = "resnet_vae"
 
-    train_dataset = "mnist"
+    train_dataset = "imagenet32"
 
     kl_per_partition = 10.0
+
+    sampler = "rejection"
+    sampler_args = {}
+
+    if sampler == "rejection":
+        sampler_args = {
+            "sample_buffer_size": 10000,
+            "r_buffer_size": 1000000
+        }
+
+    elif sampler == "importance":
+        sampler_args = {
+            "alpha": np.inf,
+            "coding_bits": kl_per_partition / np.log(2),
+
+        }
 
     if model == "vae":
         latent_size = 50
 
         model_config = {
-            "latent_size": latent_size
+            "latent_size": latent_size,
+            "sampler": sampler
         }
 
         lamb = 0.
@@ -62,6 +79,8 @@ def default_config(dataset_info):
             "num_res_blocks": num_res_blocks,
             "deterministic_filters": 160,
             "stochastic_filters": 32,
+            "sampler": sampler,
+            "sampler_args": sampler_args,
         }
 
         lamb = 0.1
@@ -180,8 +199,6 @@ def resnet_vae_compress(model_config,
             print("Codelength={}, residuals={}".format(model.get_codelength(block_indices), -model.log_likelihood))
     if update_sampler:
         model.save_weights(f"{model_save_dir}/compressor_initialized")
-
-
 
 
 @ex.automain
