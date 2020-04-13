@@ -97,6 +97,7 @@ def data_config():
 
 @data_ingredient.capture
 def load_dataset(tfds_name,
+                 dataset_name,
                  dataset_path,
                  num_pixels,
                  split,
@@ -143,7 +144,8 @@ def load_dataset(tfds_name,
     return ds, num_pixels
 
 
-def read_png(filename):
+@data_ingredient.capture
+def read_png(filename, dataset_name):
     """
     Loads a PNG image file. Taken from Balle's implementation
     """
