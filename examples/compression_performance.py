@@ -46,12 +46,14 @@ def default_config(dataset_info):
             "sample_buffer_size": 10000,
             "r_buffer_size": 1000000
         }
-
     elif sampler == "importance":
         sampler_args = {
             "alpha": np.inf,
-            "coding_bits": kl_per_partition / np.log(2),
-
+            "coding_bits": kl_per_partition / np.log(2)
+        }
+    elif sampler == 'beam_search':
+        sampler_args = {
+            "n_beams": 100
         }
 
     if model == "vae":
@@ -140,6 +142,14 @@ def resnet_vae_initialize(dataset_info,
     else:
         model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
 
+    # This is hack
+    for v in model.variables:
+        if v.name.startswith("aux_variable_variance_ratios"):
+            v.assign(tf.constant([1.]))
+        if v.name.startswith("average_counts"):
+            v.assign(tf.constant([1.]))
+        if v.name.startswith("coder_initialized"):
+            v.assign(False)
     # -------------------------------------------------------------------------
     # Set-up for compression
     # -------------------------------------------------------------------------
@@ -197,8 +207,9 @@ def resnet_vae_compress(model_config,
         if not update_sampler:
             print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
             print("Codelength={}, residuals={}".format(model.get_codelength(block_indices), -model.log_likelihood))
+
     if update_sampler:
-        model.save_weights(f"{model_save_dir}/compressor_initialized")
+        model.save_weights(f"{model_save_dir}/compressor_initialized_sampler_updated")
 
 
 @ex.automain

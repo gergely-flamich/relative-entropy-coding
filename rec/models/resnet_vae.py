@@ -7,6 +7,7 @@ import tensorflow_probability as tfp
 
 from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
 from rec.coding import GaussianCoder
+from rec.coding.beam_search_coder import BeamSearchCoder
 from rec.coding.samplers import RejectionSampler, ImportanceSampler
 
 tfl = tf.keras.layers
@@ -101,20 +102,22 @@ class BidirectionalResidualBlock(tfl.Layer):
         # Stuff for compression
         # ---------------------------------------------------------------------
         if sampler == "rejection":
-            s = RejectionSampler(**sampler_args)
-
+            self.coder = GaussianCoder(sampler=RejectionSampler(**sampler_args),
+                                       kl_per_partition=kl_per_partition,
+                                       name=f"encoder_for_{self.name}")
         elif sampler == "importance":
             # Setting alpha=inf will select the sample with
             # the best importance weights
-            s = ImportanceSampler(**sampler_args)
-
+            self.coder = GaussianCoder(sampler=ImportanceSampler(**sampler_args),
+                                       kl_per_partition=kl_per_partition,
+                                       name=f"encoder_for_{self.name}")
+        elif sampler == "beam_search":
+            self.coder = BeamSearchCoder(kl_per_partition=kl_per_partition,
+                                         n_carry_over=sampler_args['n_beams'],
+                                         name=f"encoder_for_{self.name}")
         else:
-            raise ModelError("Sampler must be one of ['rejection', 'importance'],"
+            raise ModelError("Sampler must be one of ['rejection', 'importance', 'beam_search'],"
                              f"but got {sampler}!")
-
-        self.coder = GaussianCoder(sampler=s,
-                                   kl_per_partition=kl_per_partition,
-                                   name=f"encoder_for_{self.name}")
 
         # ---------------------------------------------------------------------
         # Initialization flag

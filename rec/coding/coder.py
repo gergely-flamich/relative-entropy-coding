@@ -90,7 +90,7 @@ class GaussianCoder(Coder):
         # The variance ratio at index i creates a chunk that has KL divergence 1/(i+1) times the overall KL divergence
         self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
                                                         shape=tf.TensorShape([None]),
-                                                        name="sum_averaged_variance_ratios",
+                                                        name="aux_variable_variance_ratios",
                                                         trainable=False)
 
         # Counts over how many batch elements we averaged over
