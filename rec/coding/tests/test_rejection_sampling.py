@@ -47,8 +47,8 @@ class TestRejectionSampling(unittest.TestCase):
                                                                              t_mass,
                                                                              p_mass,
                                                                              r_buffer_size=100000)
-        np.testing.assert_allclose(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5)
-        np.testing.assert_allclose(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5)
+        np.testing.assert_allclose(r_buffer.numpy(), r_buffer_baseline, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(pstar_buffer.numpy(), pstar_buffer_baseline, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == '__main__':

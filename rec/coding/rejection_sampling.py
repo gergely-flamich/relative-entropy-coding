@@ -67,6 +67,7 @@ def gaussian_rejection_sample_small(t_dist,
                                     p_dist,
                                     sample_buffer_size,
                                     r_buffer_size,
+                                    sample_generator,
                                     seed=42069):
     """
     Encodes a single sample from a Gaussian target distribution using another Gaussian coding distribution.
@@ -82,34 +83,34 @@ def gaussian_rejection_sample_small(t_dist,
     :return: (sample, index) - tuple containing the sample and the index
     """
     assert(r_buffer_size % sample_buffer_size == 0)
+    assert t_dist.loc.shape.as_list() == p_dist.loc.shape.as_list()
     log_ratios, t_mass, p_mass = get_t_p_mass(t_dist, p_dist, n_samples=100, oversampling=100)
     r_buffer, pstar_buffer = get_r_pstar(log_ratios, t_mass, p_mass, r_buffer_size=r_buffer_size)
     kl = tf.reduce_sum(tfp.distributions.kl_divergence(t_dist, p_dist))
     if kl >= 20.:
         raise CodingError('KL divergence={} is too high for rejection sampling'.format(kl))
 
-    tf.random.set_seed(seed)
     i = 0
     for _ in range(int(r_buffer_size // sample_buffer_size)):
-        samples = p_dist.sample((sample_buffer_size,), seed=seed + i // sample_buffer_size)
-        n_axes = len(samples.shape)
-        sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
+        sample_ratios = sample_generator.get_ratios(t_dist, p_dist, seed=seed + i // sample_buffer_size)
         accepted = (tf.exp(sample_ratios) - r_buffer[i:i+sample_buffer_size]) / \
                    (1. - pstar_buffer[i:i+sample_buffer_size]) + tf.random.uniform(shape=sample_ratios.shape)
         accepted_ind = tf.where(accepted > 0.)
         if accepted_ind.shape[0] > 0:
             index = int(accepted_ind[0, 0])
-            return i + index, samples[index]
+            return i + index, sample_generator.get_index(index)
         i += sample_buffer_size
 
     # If not finished in buffer, we accept anything above ratio r
     r = r_buffer[-1]
     while True:
-        samples = p_dist.sample((sample_buffer_size,), seed=seed + i // sample_buffer_size)
-        sample_ratios = tf.reduce_sum(t_dist.log_prob(samples) - p_dist.log_prob(samples), axis=range(1, n_axes))
+        sample_ratios = sample_generator.get_ratios(t_dist, p_dist, seed=seed + i // sample_buffer_size)
         accepted_ind = tf.where(sample_ratios > tf.math.log(r))
         if accepted_ind.shape[0] > 0:
             index = int(accepted_ind[0, 0])
-            return i + index, samples[index]
+            return i + index, sample_generator.get_index(index)
         else:
             i += sample_buffer_size
+
+
+
