@@ -29,6 +29,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                  deterministic_filters: int,
                  sampler: str,
                  sampler_args: dict = {},
+                 coder_args: dict = {},
                  kernel_size: Tuple[int, int] =(3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
@@ -104,18 +105,21 @@ class BidirectionalResidualBlock(tfl.Layer):
         if sampler == "rejection":
             self.coder = GaussianCoder(sampler=RejectionSampler(**sampler_args),
                                        kl_per_partition=kl_per_partition,
-                                       name=f"encoder_for_{self.name}")
+                                       name=f"encoder_for_{self.name}",
+                                       **coder_args)
         elif sampler == "importance":
             # Setting alpha=inf will select the sample with
             # the best importance weights
             self.coder = GaussianCoder(sampler=ImportanceSampler(**sampler_args),
                                        kl_per_partition=kl_per_partition,
-                                       name=f"encoder_for_{self.name}")
+                                       name=f"encoder_for_{self.name}",
+                                       **coder_args)
         elif sampler == "beam_search":
             self.coder = BeamSearchCoder(kl_per_partition=kl_per_partition,
                                          n_beams=sampler_args['n_beams'],
                                          extra_samples=sampler_args['extra_samples'],
-                                         name=f"encoder_for_{self.name}")
+                                         name=f"encoder_for_{self.name}",
+                                         **coder_args)
         else:
             raise ModelError("Sampler must be one of ['rejection', 'importance', 'beam_search'],"
                              f"but got {sampler}!")
@@ -411,6 +415,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  num_res_blocks,
                  sampler,
                  sampler_args={},
+                 coder_args={},
                  likelihood_function="discretized_logistic",
                  learn_likelihood_scale=True,
                  first_kernel_size=(5, 5),
@@ -484,6 +489,7 @@ class BidirectionalResNetVAE(tfk.Model):
                                                            deterministic_filters=self.deterministic_filters,
                                                            sampler=self.sampler_name,
                                                            sampler_args=sampler_args,
+                                                           coder_args=coder_args,
                                                            kernel_size=self.kernel_size,
                                                            is_last=res_block_idx == 0,  # Declare last residual block
                                                            use_iaf=self.use_iaf,

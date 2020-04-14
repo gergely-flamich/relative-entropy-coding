@@ -38,6 +38,12 @@ def default_config(dataset_info):
 
     kl_per_partition = 10.
 
+    block_size = 100000
+
+    coder_args = {
+        "block_size": block_size
+    }
+
     sampler = "rejection"
     sampler_args = {}
     n_beams = 10
@@ -85,6 +91,7 @@ def default_config(dataset_info):
             "stochastic_filters": 32,
             "sampler": sampler,
             "sampler_args": sampler_args,
+            "coder_args": coder_args,
             "kl_per_partition": kl_per_partition
         }
 

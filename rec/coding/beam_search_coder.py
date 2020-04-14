@@ -29,7 +29,7 @@ class BeamSearchCoder(GaussianCoder):
         self.n_samples = np.exp(kl_per_partition * extra_samples)
         assert(self.n_samples > self.n_beams)
 
-    def encode(self, target_dist, coding_dist, seed, update_sampler=False):
+    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False):
         if not self._initialized:
             raise CodingError("Coder has not been initialized yet, please call update_auxiliary_variance_ratios() first!")
 
@@ -103,7 +103,7 @@ class BeamSearchCoder(GaussianCoder):
                                                              coding_dist.log_prob(beams[0] + coding_dist.loc))))
         return list(beam_indices[0, :]), beams[0] + coding_dist.loc
 
-    def decode(self, coding_dist, indices, seed):
+    def decode_block(self, coding_dist, indices, seed):
         num_aux_variables = len(indices)
 
         indices.reverse()
