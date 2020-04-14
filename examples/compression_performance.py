@@ -127,7 +127,8 @@ def resnet_vae_initialize(dataset_info,
     # -------------------------------------------------------------------------
     # Create Checkpoints
     # -------------------------------------------------------------------------
-    if not os.path.exists(f"{model_save_dir}/compressor_initialized.index"):
+    compressor_initialized_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
+    if not os.path.exists(f"{compressor_initialized_dir}/compressor_initialized.index"):
         optimizer = tf.optimizers.Adamax()
         ckpt = tf.train.Checkpoint(model=model,
                                    optimizer=optimizer)
@@ -145,14 +146,15 @@ def resnet_vae_initialize(dataset_info,
         model.swap_in_ema_variables()
 
     else:
-        model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
+        model.load_weights(f"{compressor_initialized_dir}/compressor_initialized").expect_partial()
 
     # -------------------------------------------------------------------------
     # Set-up for compression
     # -------------------------------------------------------------------------
+    model.save_weights(f"{compressor_initialized_dir}/compressor_initialized")
     for images in dataset:
         model.update_coders(images)
-    model.save_weights(f"{model_save_dir}/compressor_initialized")
+    model.save_weights(f"{compressor_initialized_dir}/compressor_initialized")
 
 
 @ex.capture
