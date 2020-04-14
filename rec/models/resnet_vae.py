@@ -419,7 +419,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  deterministic_filters=160,
                  stochastic_filters=32,
                  use_iaf=False,
-                 kl_per_partition=8.,
+                 kl_per_partition=None,
                  latent_size="variable",
                  ema_decay=0.999,
                  name="resnet_vae",
@@ -709,7 +709,7 @@ class BidirectionalResNetVAE(tfk.Model):
         for resnet_block in self.residual_blocks:
             indices, tensor = resnet_block(tensor,
                                            inference_pass=False,
-                                           encoder_args={"seed": seed, "update_sampler":update_sampler})
+                                           encoder_args={"seed": seed, "update_sampler": update_sampler})
 
             block_indices.append(indices)
 

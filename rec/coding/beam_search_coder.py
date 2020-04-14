@@ -23,14 +23,12 @@ class BeamSearchCoder(GaussianCoder):
                  name="gaussian_encoder",
                  **kwargs):
 
-        super().__init__(name=name, kl_per_partition=6., sampler=None, **kwargs)
+        super().__init__(name=name, kl_per_partition=kl_per_partition, sampler=None, **kwargs)
         self.n_carry_over = n_carry_over
-        self.n_samples = np.exp(kl_per_partition)
+        self.n_samples = np.exp(kl_per_partition * 1.1)
         assert(self.n_samples > self.n_carry_over)
 
-
-    def encode(self, target_dist, coding_dist, seed):
-
+    def encode(self, target_dist, coding_dist, seed, update_sampler=False):
         if not self._initialized:
             raise CodingError("Coder has not been initialized yet, please call update_auxiliary_variance_ratios() first!")
 
@@ -44,36 +42,36 @@ class BeamSearchCoder(GaussianCoder):
         # If there are more auxiliary variables needed than what we are already storing, we update our estimates
         current_max = tf.shape(self.aux_variable_variance_ratios)[0]
         if num_aux_variables > current_max:
-            raise CodingError("KL divergence higher than auxiliary variables can account for. "
-                              "Update auxiliary variable ratios with high-enough KL divergence."
-                              "Maximum possible KL divergence is {}.".format(current_max.numpy() * self.kl_per_partition))
+            self.update_auxiliary_variance_ratios(target_dist, coding_dist)
+            # raise CodingError("KL divergence higher than auxiliary variables can account for. "
+            #                   "Update auxiliary variable ratios with high-enough KL divergence."
+            #                   "Maximum possible KL divergence is {}.".format(current_max.numpy() * self.kl_per_partition))
 
         # We iterate backward until the second entry in ratios. The first entry is 1.,
         # in which case we just draw the final sample.
         n_dims = len(target_dist.loc.shape)
-        cumulative_auxiliary_variance_ratio = 0.
         cumulative_auxiliary_variance = 0.
         iteration = 0
         for i in range(num_aux_variables - 1, -1, -1):
             aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
-            auxiliary_var = aux_variable_variance_ratio * (1. - cumulative_auxiliary_variance_ratio) \
-                * tf.math.pow(coding_dist.scale, 2)
+            auxiliary_var = aux_variable_variance_ratio * (tf.math.pow(coding_dist.scale, 2)
+                                                           - cumulative_auxiliary_variance)
 
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
-
-            if i > 0:
-                auxiliary_target = get_auxiliary_target(target=target_dist,
-                                                        coder=coding_dist,
-                                                        auxiliary_var=auxiliary_var + cumulative_auxiliary_variance)
-            else:
-                auxiliary_target = target_dist
+            cumulative_auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
+                                                             auxiliary_var=auxiliary_var + cumulative_auxiliary_variance)
+            auxiliary_target = get_auxiliary_target(target=target_dist,
+                                                    coder=coding_dist,
+                                                    auxiliary_var=auxiliary_var + cumulative_auxiliary_variance)
 
             if iteration > 0:
                 samples = tf.stack([sample_with_seed(auxiliary_coder, (self.n_samples, ), seed=seed) for seed in
                                     seed + tf.reduce_sum(beam_indices, axis=1)], axis=1)
                 combined_samples = beams + samples
-                log_probs = tf.reduce_sum(auxiliary_target.log_prob(combined_samples), axis=range(2, n_dims + 2))
+                log_probs = tf.reduce_sum(auxiliary_target.log_prob(combined_samples)
+                                          - cumulative_auxiliary_coder.log_prob(combined_samples),
+                                          axis=range(2, n_dims + 2))
                 flat_log_probs = tf.reshape(log_probs, [-1])
                 sorted_ind_1d = tf.argsort(flat_log_probs, direction='DESCENDING')
                 best_ind_beam = sorted_ind_1d[:self.n_carry_over] % self.n_carry_over
@@ -86,28 +84,34 @@ class BeamSearchCoder(GaussianCoder):
                                           best_ind_aux[:, None]), axis=1)
             else:
                 samples = sample_with_seed(auxiliary_coder, (self.n_samples,), seed=seed)
-                log_probs = tf.reduce_sum(auxiliary_target.log_prob(samples), axis=range(1, n_dims + 1))
+                log_probs = tf.reduce_sum(auxiliary_target.log_prob(samples)
+                                          - cumulative_auxiliary_coder.log_prob(samples),
+                                          axis=range(1, n_dims + 1))
                 sorted_ind = tf.argsort(log_probs, direction='DESCENDING')
                 beams = tf.gather_nd(samples, sorted_ind[:self.n_carry_over, None])
                 beam_indices = sorted_ind[:self.n_carry_over, None]
 
             iteration += 1
-            cumulative_auxiliary_variance_ratio += aux_variable_variance_ratio * \
-                (1. - cumulative_auxiliary_variance_ratio)
             cumulative_auxiliary_variance += auxiliary_var
 
-        return list(beam_indices[0, :]), beams[0]
+        target_sample = target_dist.sample()
+        target_entropy = tf.reduce_sum(target_dist.log_prob(target_sample) - coding_dist.log_prob(target_sample))
+        print('Target entropy={}, log_density={}'.format(target_entropy,
+                                                         tf.reduce_sum(
+                                                             target_dist.log_prob(beams[0] + coding_dist.loc) -
+                                                             coding_dist.log_prob(beams[0] + coding_dist.loc))))
+        return list(beam_indices[0, :]), beams[0] + coding_dist.loc
 
     def decode(self, coding_dist, indices, seed):
         num_aux_variables = len(indices)
 
         indices.reverse()
         sample = tf.zeros_like(coding_dist.loc)
-        cumulative_auxiliary_variance_ratio = 0.
+        cumulative_auxiliary_variance = 0.
         for i in range(num_aux_variables - 1, -1, -1):
             aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
-            auxiliary_var = aux_variable_variance_ratio * (1. - cumulative_auxiliary_variance_ratio) \
-                * tf.math.pow(coding_dist.scale, 2)
+            auxiliary_var = aux_variable_variance_ratio * (tf.math.pow(coding_dist.scale, 2)
+                                                           - cumulative_auxiliary_variance)
 
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
@@ -116,10 +120,9 @@ class BeamSearchCoder(GaussianCoder):
             sample = sample + aux_samples[indices[i]]
             seed += indices[i]
 
-            cumulative_auxiliary_variance_ratio += aux_variable_variance_ratio * \
-                (1. - cumulative_auxiliary_variance_ratio)
+            cumulative_auxiliary_variance += auxiliary_var
 
-        return sample
+        return sample + coding_dist.loc
 
     def get_codelength(self, indicies):
-        return sum([self.sampler.get_codelength(i) for i in indicies])
+        return len(indicies) * np.log(self.n_samples)
