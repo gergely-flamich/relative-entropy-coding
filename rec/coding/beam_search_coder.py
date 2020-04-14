@@ -20,7 +20,7 @@ class BeamSearchCoder(GaussianCoder):
     def __init__(self,
                  kl_per_partition,
                  n_beams,
-                 extra_samples,
+                 extra_samples=1.,
                  name="gaussian_encoder",
                  **kwargs):
 
