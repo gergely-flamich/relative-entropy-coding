@@ -98,7 +98,7 @@ class ImportanceSampler(Sampler):
         print("ImportanceSampler doesn't require updating!")
 
     def get_codelength(self, index):
-        return self.coding_bits
+        return tf.cast(self.coding_bits, tf.float32) * tf.math.log(2.)
 
 
 class RejectionSampler(Sampler):
