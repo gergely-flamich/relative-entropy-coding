@@ -19,14 +19,15 @@ def sample_with_seed(dist, shape, seed):
 class BeamSearchCoder(GaussianCoder):
     def __init__(self,
                  kl_per_partition,
-                 n_carry_over,
+                 n_beams,
+                 extra_samples,
                  name="gaussian_encoder",
                  **kwargs):
 
         super().__init__(name=name, kl_per_partition=kl_per_partition, sampler=None, **kwargs)
-        self.n_carry_over = n_carry_over
-        self.n_samples = np.exp(kl_per_partition * 1.1)
-        assert(self.n_samples > self.n_carry_over)
+        self.n_beams = n_beams
+        self.n_samples = np.exp(kl_per_partition * extra_samples)
+        assert(self.n_samples > self.n_beams)
 
     def encode(self, target_dist, coding_dist, seed, update_sampler=False):
         if not self._initialized:
@@ -74,8 +75,8 @@ class BeamSearchCoder(GaussianCoder):
                                           axis=range(2, n_dims + 2))
                 flat_log_probs = tf.reshape(log_probs, [-1])
                 sorted_ind_1d = tf.argsort(flat_log_probs, direction='DESCENDING')
-                best_ind_beam = sorted_ind_1d[:self.n_carry_over] % self.n_carry_over
-                best_ind_aux = sorted_ind_1d[:self.n_carry_over] // self.n_carry_over
+                best_ind_beam = sorted_ind_1d[:self.n_beams] % self.n_beams
+                best_ind_aux = sorted_ind_1d[:self.n_beams] // self.n_beams
                 assert(log_probs[best_ind_aux[0], best_ind_beam[0]] == flat_log_probs[sorted_ind_1d[0]])
 
                 beam_ind = tf.stack((best_ind_aux, best_ind_beam), axis=1)
@@ -88,8 +89,8 @@ class BeamSearchCoder(GaussianCoder):
                                           - cumulative_auxiliary_coder.log_prob(samples),
                                           axis=range(1, n_dims + 1))
                 sorted_ind = tf.argsort(log_probs, direction='DESCENDING')
-                beams = tf.gather_nd(samples, sorted_ind[:self.n_carry_over, None])
-                beam_indices = sorted_ind[:self.n_carry_over, None]
+                beams = tf.gather_nd(samples, sorted_ind[:self.n_beams, None])
+                beam_indices = sorted_ind[:self.n_beams, None]
 
             iteration += 1
             cumulative_auxiliary_variance += auxiliary_var

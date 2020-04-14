@@ -113,7 +113,8 @@ class BidirectionalResidualBlock(tfl.Layer):
                                        name=f"encoder_for_{self.name}")
         elif sampler == "beam_search":
             self.coder = BeamSearchCoder(kl_per_partition=kl_per_partition,
-                                         n_carry_over=sampler_args['n_beams'],
+                                         n_beams=sampler_args['n_beams'],
+                                         extra_samples=sampler_args['extra_samples'],
                                          name=f"encoder_for_{self.name}")
         else:
             raise ModelError("Sampler must be one of ['rejection', 'importance', 'beam_search'],"

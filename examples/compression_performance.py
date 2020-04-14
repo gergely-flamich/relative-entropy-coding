@@ -54,7 +54,8 @@ def default_config(dataset_info):
         }
     elif sampler == 'beam_search':
         sampler_args = {
-            "n_beams": n_beams
+            "n_beams": n_beams,
+            "extra_samples": 1.
         }
 
     if model == "vae":
