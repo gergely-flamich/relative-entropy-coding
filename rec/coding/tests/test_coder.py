@@ -10,7 +10,7 @@ from rec.coding.samplers import RejectionSampler
 
 class TestCoder(unittest.TestCase):
     def test_beam_search(self):
-        encoder = BeamSearchCoder(kl_per_partition=6., n_beams=100, extra_samples=1.)
+        encoder = BeamSearchCoder(kl_per_partition=6., n_beams=10, extra_samples=1.)
 
         batch_t = tfp.distributions.Normal(loc=tf.constant([[5.], [-5.1]]), scale=tf.constant([[0.001], [0.001]]))
         batch_p = tfp.distributions.Normal(loc=tf.constant([[0.], [0.]]), scale=tf.constant([[1.], [1.]]))
@@ -20,6 +20,7 @@ class TestCoder(unittest.TestCase):
         p = tfp.distributions.Normal(loc=tf.constant([[0.]]), scale=tf.constant([[1.]]))
 
         indices, sample = encoder.encode(t, p, seed=69420, update_sampler=False)
+        print(sample)
         reconstructed_sample = encoder.decode(p, indices, seed=69420)
         np.testing.assert_allclose(sample, reconstructed_sample)
 
