@@ -10,25 +10,8 @@ tfl = tf.keras.layers
 tfd = tfp.distributions
 
 
-# A slightly biased hash function. Not good but fast. Its late at night, please don't judge.
-def simple_hash(matrix):
-    return tf.math.floormod(tf.cast(tf.reduce_sum(matrix * tf.range(69, 69 + matrix.shape[1]), axis=1),
-                                    tf.float64), 997.)
-
-
-def get_pseudo_random_sample(dist, n_samples, index_matrix, seed):
-    tf.random.set_seed(seed)
-    sample_randomness = tf.random.uniform([n_samples] + dist.loc.shape, seed=seed, dtype=tf.float64)
-    hashes = simple_hash(index_matrix)
-    hashed_randomness = tf.math.floormod(tf.expand_dims(sample_randomness, 1) *
-                                         tf.reshape(hashes, [index_matrix.shape[0]] +
-                                                    [1 for _ in dist.loc.shape]), 1.)
-    hashed_randomness = tf.cast(tf.clip_by_value(hashed_randomness, 1e-10, 1. - 1e-10), tf.float32)
-    samples = dist.quantile(hashed_randomness)
-    return samples
-
-
 class BeamSearchCoder(GaussianCoder):
+
     def __init__(self,
                  kl_per_partition,
                  n_beams,
@@ -39,7 +22,28 @@ class BeamSearchCoder(GaussianCoder):
         super().__init__(name=name, kl_per_partition=kl_per_partition, sampler=None, **kwargs)
         self.n_beams = n_beams
         self.n_samples = int(np.exp(kl_per_partition * extra_samples))
-        assert(self.n_samples > self.n_beams)
+        self.big_prime = 10007
+
+    # A slightly biased hash function. Not good but fast. Its late at night, please don't judge.
+    def simple_hash(self, matrix):
+        return tf.math.floormod(tf.reduce_sum(matrix * tf.range(69, 69 + matrix.shape[1]), axis=1),
+                                self.big_prime - 1) + 1
+
+    def get_pseudo_random_sample(self, dist, n_samples, index_matrix, seed):
+        tf.random.set_seed(seed)
+        sample_randomness = tf.random.uniform([n_samples] + dist.loc.shape,
+                                              minval=1,
+                                              maxval=self.big_prime,
+                                              seed=seed,
+                                              dtype=tf.int32)
+        hashes = self.simple_hash(index_matrix)
+        hashed_randomness = tf.math.floormod(tf.expand_dims(sample_randomness, 1) *
+                                             tf.reshape(hashes, [index_matrix.shape[0]] +
+                                                        [1 for _ in dist.loc.shape]), self.big_prime)
+        hashed_randomness = tf.cast(hashed_randomness, tf.float32) / self.big_prime
+        samples = dist.quantile(hashed_randomness)
+        # return tf.stack([dist.sample(n_samples,) for _ in range(index_matrix.shape[0])], axis=1)
+        return samples
 
     def encode(self, target_dist, coding_dist, seed, update_sampler=False):
         if not self._initialized:
@@ -55,10 +59,9 @@ class BeamSearchCoder(GaussianCoder):
         # If there are more auxiliary variables needed than what we are already storing, we update our estimates
         current_max = tf.shape(self.aux_variable_variance_ratios)[0]
         if num_aux_variables > current_max:
-            self.update_auxiliary_variance_ratios(target_dist, coding_dist)
-            # raise CodingError("KL divergence higher than auxiliary variables can account for. "
-            #                   "Update auxiliary variable ratios with high-enough KL divergence."
-            #                   "Maximum possible KL divergence is {}.".format(current_max.numpy() * self.kl_per_partition))
+            raise CodingError("KL divergence higher than auxiliary variables can account for. "
+                              "Update auxiliary variable ratios with high-enough KL divergence."
+                              "Maximum possible KL divergence is {}.".format(current_max.numpy() * self.kl_per_partition))
 
         # We iterate backward until the second entry in ratios. The first entry is 1.,
         # in which case we just draw the final sample.
@@ -79,15 +82,16 @@ class BeamSearchCoder(GaussianCoder):
                                                     auxiliary_var=auxiliary_var + cumulative_auxiliary_variance)
 
             if iteration > 0:
-                samples = get_pseudo_random_sample(auxiliary_coder, self.n_samples, beam_indices, seed + iteration)
+                samples = self.get_pseudo_random_sample(auxiliary_coder, self.n_samples, beam_indices, seed + iteration)
                 combined_samples = beams + samples  # n_samples x n_beams x sample_shape
                 log_probs = tf.reduce_sum(auxiliary_target.log_prob(combined_samples)
                                           - cumulative_auxiliary_coder.log_prob(combined_samples),
                                           axis=range(2, n_dims + 2))
                 flat_log_probs = tf.reshape(log_probs, [-1])
                 sorted_ind_1d = tf.argsort(flat_log_probs, direction='DESCENDING')
-                best_ind_beam = sorted_ind_1d[:self.n_beams] % self.n_beams
-                best_ind_aux = sorted_ind_1d[:self.n_beams] // self.n_beams
+                n_current_beams = beams.shape[0]
+                best_ind_beam = sorted_ind_1d[:self.n_beams] % n_current_beams
+                best_ind_aux = sorted_ind_1d[:self.n_beams] // n_current_beams
                 assert(log_probs[best_ind_aux[0], best_ind_beam[0]] == flat_log_probs[sorted_ind_1d[0]])
 
                 beam_ind = tf.stack((best_ind_aux, best_ind_beam), axis=1)
@@ -95,7 +99,7 @@ class BeamSearchCoder(GaussianCoder):
                 beam_indices = tf.concat((tf.gather_nd(beam_indices[:, :iteration], best_ind_beam[:, None]),
                                           best_ind_aux[:, None]), axis=1)
             else:
-                samples = get_pseudo_random_sample(auxiliary_coder,
+                samples = self.get_pseudo_random_sample(auxiliary_coder,
                                                    self.n_samples,
                                                    tf.constant([[]], dtype=tf.int32),
                                                    seed + iteration)[:, 0]
@@ -132,10 +136,11 @@ class BeamSearchCoder(GaussianCoder):
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
                                                   auxiliary_var=auxiliary_var)
 
-            aux_samples = get_pseudo_random_sample(auxiliary_coder,
-                                                   self.n_samples,
-                                                   index_matrix=tf.constant(np.array([indices[i+1:][::-1]]), dtype=tf.int32),
-                                                   seed=seed + iteration)
+            aux_samples = self.get_pseudo_random_sample(auxiliary_coder,
+                                                        self.n_samples,
+                                                        index_matrix=tf.constant(np.array([indices[i+1:][::-1]]),
+                                                                                 dtype=tf.int32),
+                                                        seed=seed + iteration)
             sample = sample + aux_samples[indices[i], 0]
             iteration += 1
             cumulative_auxiliary_variance += auxiliary_var

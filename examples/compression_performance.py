@@ -3,6 +3,7 @@ from sacred import Experiment
 import os
 import json
 import datetime
+import time
 
 import tensorflow as tf
 import numpy as np
@@ -11,8 +12,9 @@ from rec.models.mnist_vae import MNISTVAE
 from rec.models.resnet_vae import BidirectionalResNetVAE
 
 from datasets import data_ingredient, load_dataset
+from rec.coding.utils import CodingError
 
-tf.config.experimental.set_visible_devices([], 'GPU')
+# tf.config.experimental.set_visible_devices([], 'GPU')
 
 ex = Experiment("compression_performance", ingredients=[data_ingredient])
 
@@ -41,6 +43,7 @@ def default_config(dataset_info):
     sampler = "rejection"
     sampler_args = {}
     n_beams = 10
+    extra_samples = 1.2
 
     if sampler == "rejection":
         sampler_args = {
@@ -55,7 +58,7 @@ def default_config(dataset_info):
     elif sampler == 'beam_search':
         sampler_args = {
             "n_beams": n_beams,
-            "extra_samples": 1.
+            "extra_samples": extra_samples
         }
 
     if model == "vae":
@@ -183,7 +186,8 @@ def resnet_vae_compress(model_config,
     # -------------------------------------------------------------------------
     # Restore model
     # -------------------------------------------------------------------------
-    model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
+    compressor_initialized_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
+    model.load_weights(f"{compressor_initialized_dir}/compressor_initialized").expect_partial()
 
     # for images in dataset:
     #     model(images)
@@ -200,16 +204,16 @@ def resnet_vae_compress(model_config,
     # -------------------------------------------------------------------------
     # Compress images
     # -------------------------------------------------------------------------
-    output_filename = os.path.join(model_save_dir, output_file)
+    output_filename = os.path.join(compressor_initialized_dir, output_file)
     with open(output_filename, "w") as outfile:
         outfile.write(', '.join(['residual', 'KL', 'BPP', 'BPD', 'comp_residual',
-                                 'comp_codelength', 'comp_KL', 'comp_BPP', 'comp_BPD']))
+                                 'comp_codelength', 'comp_KL', 'comp_BPP', 'comp_BPD', 'comp_time']))
         outfile.write('\n')
 
     if update_sampler:
         for images in dataset:
             model.compress(images, update_sampler=update_sampler, seed=42)
-        model.save_weights(f"{model_save_dir}/compressor_initialized_sampler_updated")
+        model.save_weights(f"{compressor_initialized_dir}/compressor_initialized_sampler_updated")
         return
 
     for images in dataset:
@@ -225,7 +229,18 @@ def resnet_vae_compress(model_config,
         bpd = bpp / dataset_info["num_channels"]
 
         # Measurements with compression
-        block_indices, reconstruction = model.compress(images, update_sampler=update_sampler, seed=42)
+        start_time = time.time()
+        try:
+            block_indices, reconstruction = model.compress(images, update_sampler=update_sampler, seed=42)
+        except CodingError:
+            _log.info("Coding Error occurred. KL divergence too high")
+            with open(output_filename, "a") as outfile:
+                outfile.write(', '.join([str(float(v)) for v in [residual, kld, bpp, bpd, -1,
+                                                                 -1, -1, -1,
+                                                                 -1, -1]]))
+                outfile.write('\n')
+            continue
+        comp_time = time.time() - start_time
         comp_kld = model.kl_divergence(empirical=False, minimum_kl=0.)
         comp_codelength = model.get_codelength(block_indices)
         comp_residual = -model.log_likelihood
@@ -236,7 +251,8 @@ def resnet_vae_compress(model_config,
         _log.info("Codelength: {}, residuals: {}".format(comp_codelength, comp_residual))
         with open(output_filename, "a") as outfile:
             outfile.write(', '.join([str(float(v)) for v in [residual, kld, bpp, bpd, comp_residual,
-                                                             comp_codelength, comp_kld, comp_bpp, comp_bpd]]))
+                                                             comp_codelength, comp_kld, comp_bpp,
+                                                             comp_bpd, comp_time]]))
             outfile.write('\n')
 
 @ex.automain
