@@ -1,9 +1,9 @@
 from sacred import Experiment
 
 import os
-
 import json
 import datetime
+import time
 
 import tensorflow as tf
 import numpy as np
@@ -12,8 +12,9 @@ from rec.models.mnist_vae import MNISTVAE
 from rec.models.resnet_vae import BidirectionalResNetVAE
 
 from datasets import data_ingredient, load_dataset
+from rec.coding.utils import CodingError
 
-tf.config.experimental.set_visible_devices([], 'GPU')
+# tf.config.experimental.set_visible_devices([], 'GPU')
 
 ex = Experiment("compression_performance", ingredients=[data_ingredient])
 
@@ -25,6 +26,7 @@ def default_config(dataset_info):
 
     if mode == "compress" or mode == "update_sampler":
         num_test_images = 1
+        output_file = 'results.csv'
     elif mode == "initialize":
         num_test_images = 300
         batch_size = 128
@@ -36,22 +38,33 @@ def default_config(dataset_info):
 
     train_dataset = "imagenet32"
 
-    kl_per_partition = 10.0
+    kl_per_partition = 10.
+
+    block_size = 100000
+
+    coder_args = {
+        "block_size": block_size
+    }
 
     sampler = "rejection"
     sampler_args = {}
+    n_beams = 10
+    extra_samples = 1.2
 
     if sampler == "rejection":
         sampler_args = {
             "sample_buffer_size": 10000,
             "r_buffer_size": 1000000
         }
-
     elif sampler == "importance":
         sampler_args = {
             "alpha": np.inf,
-            "coding_bits": kl_per_partition / np.log(2),
-
+            "coding_bits": kl_per_partition / np.log(2)
+        }
+    elif sampler == 'beam_search':
+        sampler_args = {
+            "n_beams": n_beams,
+            "extra_samples": extra_samples
         }
 
     if model == "vae":
@@ -81,7 +94,10 @@ def default_config(dataset_info):
             "stochastic_filters": 32,
             "sampler": sampler,
             "sampler_args": sampler_args,
+            "coder_args": coder_args,
+            "kl_per_partition": kl_per_partition
         }
+
 
         lamb = 0.1
         beta = 1.
@@ -103,6 +119,7 @@ def resnet_vae_initialize(dataset_info,
                           num_test_images,
                           batch_size,
                           dataset,
+                          kl_per_partition,
                           _log):
     # -------------------------------------------------------------------------
     # Batch the dataset
@@ -120,7 +137,8 @@ def resnet_vae_initialize(dataset_info,
     # -------------------------------------------------------------------------
     # Create Checkpoints
     # -------------------------------------------------------------------------
-    if not os.path.exists(f"{model_save_dir}/compressor_initialized.index"):
+    compressor_initialized_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
+    if not os.path.exists(f"{compressor_initialized_dir}/compressor_initialized.index"):
         optimizer = tf.optimizers.Adamax()
         ckpt = tf.train.Checkpoint(model=model,
                                    optimizer=optimizer)
@@ -138,14 +156,15 @@ def resnet_vae_initialize(dataset_info,
         model.swap_in_ema_variables()
 
     else:
-        model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
+        model.load_weights(f"{compressor_initialized_dir}/compressor_initialized").expect_partial()
 
     # -------------------------------------------------------------------------
     # Set-up for compression
     # -------------------------------------------------------------------------
+    model.save_weights(f"{compressor_initialized_dir}/compressor_initialized")
     for images in dataset:
         model.update_coders(images)
-    model.save_weights(f"{model_save_dir}/compressor_initialized")
+    model.save_weights(f"{compressor_initialized_dir}/compressor_initialized")
 
 
 @ex.capture
@@ -155,6 +174,8 @@ def resnet_vae_compress(model_config,
                         update_sampler,
                         dataset,
                         dataset_info,
+                        kl_per_partition,
+                        output_file,
                         _log):
     # -------------------------------------------------------------------------
     # Batch the dataset
@@ -172,34 +193,74 @@ def resnet_vae_compress(model_config,
     # -------------------------------------------------------------------------
     # Restore model
     # -------------------------------------------------------------------------
-    model.load_weights(f"{model_save_dir}/compressor_initialized").expect_partial()
+    compressor_initialized_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
+    model.load_weights(f"{compressor_initialized_dir}/compressor_initialized").expect_partial()
 
-    for images in dataset:
-        model(images)
+    # for images in dataset:
+    #     model(images)
+    #
 
-    if dataset_info["dataset_name"] == "clic2019":
-        num_pixels = images.shape[1] * images.shape[2]
-    else:
-        num_pixels = dataset_info["num_pixels"]
-
-    kld = model.kl_divergence(empirical=True, minimum_kl=0.)
-    neg_elbo = -model.log_likelihood + kld
-    bpp = neg_elbo / (num_pixels * np.log(2))
-    bpd = bpp / dataset_info["num_channels"]
-
-    print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
+    #
+    # kld = model.kl_divergence(empirical=True, minimum_kl=0.)
+    # neg_elbo = -model.log_likelihood + kld
+    # bpp = neg_elbo / (num_pixels * np.log(2))
+    # bpd = bpp / dataset_info["num_channels"]
+    #
+    # _log.info(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
 
     # -------------------------------------------------------------------------
     # Compress images
     # -------------------------------------------------------------------------
-    for images in dataset:
-        block_indices, reconstruction = model.compress(images, update_sampler=update_sampler, seed=42)
-        if not update_sampler:
-            print(f"Negative ELBO: {neg_elbo:.3f}, KL divergence: {kld:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
-            print("Codelength={}, residuals={}".format(model.get_codelength(block_indices), -model.log_likelihood))
-    if update_sampler:
-        model.save_weights(f"{model_save_dir}/compressor_initialized")
+    output_filename = os.path.join(compressor_initialized_dir, output_file)
+    with open(output_filename, "w") as outfile:
+        outfile.write(', '.join(['residual', 'KL', 'BPP', 'BPD', 'comp_residual',
+                                 'comp_codelength', 'comp_KL', 'comp_BPP', 'comp_BPD', 'comp_time']))
+        outfile.write('\n')
 
+    if update_sampler:
+        for images in dataset:
+            model.compress(images, update_sampler=update_sampler, seed=42)
+        model.save_weights(f"{compressor_initialized_dir}/compressor_initialized_sampler_updated")
+        return
+
+    for images in dataset:
+        # Measurements without compression
+        model(images)
+        if dataset_info["dataset_name"] == "clic2019":
+            num_pixels = images.shape[1] * images.shape[2]
+        else:
+            num_pixels = dataset_info["num_pixels"]
+        kld = model.kl_divergence(empirical=False, minimum_kl=0.)
+        residual = -model.log_likelihood
+        bpp = (kld + residual) / (num_pixels * np.log(2))
+        bpd = bpp / dataset_info["num_channels"]
+
+        # Measurements with compression
+        start_time = time.time()
+        try:
+            block_indices, reconstruction = model.compress(images, update_sampler=update_sampler, seed=42)
+        except CodingError:
+            _log.info("Coding Error occurred. KL divergence too high")
+            with open(output_filename, "a") as outfile:
+                outfile.write(', '.join([str(float(v)) for v in [residual, kld, bpp, bpd, -1,
+                                                                 -1, -1, -1,
+                                                                 -1, -1]]))
+                outfile.write('\n')
+            continue
+        comp_time = time.time() - start_time
+        comp_kld = model.kl_divergence(empirical=False, minimum_kl=0.)
+        comp_codelength = model.get_codelength(block_indices)
+        comp_residual = -model.log_likelihood
+        comp_bpp = (comp_kld + comp_residual) / (num_pixels * np.log(2))
+        comp_bpd = comp_bpp / dataset_info["num_channels"]
+
+        _log.info(f"KL divergence: {kld:.3f}, residuals: {residual:.3f}, BPP: {bpp:.5f}, BPD: {bpd:.5f}")
+        _log.info("Codelength: {}, residuals: {}".format(comp_codelength, comp_residual))
+        with open(output_filename, "a") as outfile:
+            outfile.write(', '.join([str(float(v)) for v in [residual, kld, bpp, bpd, comp_residual,
+                                                             comp_codelength, comp_kld, comp_bpp,
+                                                             comp_bpd, comp_time]]))
+            outfile.write('\n')
 
 @ex.automain
 def compress_data(model, mode, _log):

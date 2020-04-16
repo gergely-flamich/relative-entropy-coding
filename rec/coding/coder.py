@@ -25,10 +25,115 @@ def sigmoid_inverse(x):
 class Coder(tfl.Layer, abc.ABC):
 
     def __init__(self,
+                 block_size=None,
                  name="encoder",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
+
+        self.block_size = block_size
+
+    def split(self, *args, seed=42):
+        """
+        Splits the arguments into conformal blocks
+        :return:
+        """
+
+        tensor_shape = args[0].shape
+        num_tensors = len(args)
+
+        flattened = []
+
+        # Check if the shapes are alright
+        for tensor in args:
+            if tensor.shape != tensor_shape:
+                raise CodingError("All tensor arguments supplied to split "
+                                  "must have the same batch dimensions!")
+
+            flattened.append(tf.reshape(tensor, [-1]))
+
+        # Total number of dimensions for each tensor
+        num_dims = flattened[0].shape[0]
+
+        # We will permute the indices and gather using them to ensure that every block is
+        # shuffled the same way
+        tf.random.set_seed(seed)
+        indices = tf.range(num_dims, dtype=tf.int64)
+        indices = tf.random.shuffle(indices)[:, None]
+
+        # Shuffle each tensor the same way
+        flattened = [tf.gather_nd(flat, indices) for flat in flattened]
+
+        # Split tensors into blocks
+
+        # Calculate the number of blocks
+        num_blocks = num_dims // self.block_size
+        num_blocks += (0 if num_dims % self.block_size == 0 else 1)
+
+        all_blocks = []
+        for tensor in flattened:
+
+            blocks = []
+            for i in range(0, num_dims, self.block_size):
+                # The minimum ensures that we do get indices out of bounds
+                blocks.append(tensor[i:min(i + self.block_size, num_dims)])
+
+            all_blocks.append(blocks)
+
+        return all_blocks
+
+    def merge(self, *args, shape=None, seed=42):
+        """
+        Inverse operation to split
+        :return:
+        """
+
+        if shape is None:
+            raise CodingError("Shape cannot be None!")
+
+        # We first merge the blocks back
+        tensors = [tf.concat(blocks, axis=0) for blocks in args]
+
+        # Check that all tensors have the same shape now
+        num_dims = tensors[0].shape[0]
+
+        for tensor in tensors:
+            if tf.rank(tensor) != 1:
+                raise CodingError("All supplied tensors to merge must be rank 1!")
+
+            if tensor.shape[0] != num_dims:
+                raise CodingError("All tensors must have the same number of dimensions!")
+
+        # We will inverse permute the indices and gather using them
+        # to ensure that every block is un-shuffled the same way
+        tf.random.set_seed(seed)
+        indices = tf.range(num_dims, dtype=tf.int64)
+        indices = tf.random.shuffle(indices)
+        indices = tf.math.invert_permutation(indices)[:, None]
+
+        tensors = [tf.gather_nd(tensor, indices)
+                   for tensor in tensors]
+
+        # Reshape each tensor appropriately
+        tensors = [tf.reshape(tensor, shape) for tensor in tensors]
+
+        return tensors
+
+    @abc.abstractmethod
+    def encode(self, target_dist, coding_dist, seed, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def decode(self, coding_dist, indices, seed, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def encode_block(self, target_dist, coding_dist, seed, **kwargs):
+        pass
+
+    @abc.abstractmethod
+    def decode_block(self, coding_dist, indices, seed, **kwargs):
+        pass
 
 
 def get_auxiliary_coder(coder, auxiliary_var):
@@ -42,7 +147,7 @@ def get_auxiliary_target(target, coder, auxiliary_var):
     target_var = tf.math.pow(target.scale, 2)
     auxiliary_target_mean = (target.loc - coder.loc) * auxiliary_var / coder_var
     auxiliary_target_var = target_var * tf.math.pow(auxiliary_var, 2) / tf.math.pow(coder_var, 2) \
-                        + auxiliary_var * (coder_var - auxiliary_var) / coder_var
+                           + auxiliary_var * (coder_var - auxiliary_var) / coder_var
     ta = tfp.distributions.Normal(loc=auxiliary_target_mean, scale=tf.sqrt(auxiliary_target_var))
     return ta
 
@@ -60,7 +165,7 @@ def get_conditional_target(target, coder, auxiliary_var, auxiliary_sample):
                                (target.loc - coder.loc) * (coder_var - auxiliary_var) * coder_var) /
                   (target_var * auxiliary_var + coder_var * (coder_var - auxiliary_var)))
     new_t_var = target_var * coder_var * (coder_var - auxiliary_var) / \
-        (auxiliary_var * target_var + coder_var * (coder_var - auxiliary_var))
+                (auxiliary_var * target_var + coder_var * (coder_var - auxiliary_var))
     return tfp.distributions.Normal(new_t_mean, tf.sqrt(new_t_var))
 
 
@@ -68,10 +173,12 @@ class GaussianCoder(Coder):
     def __init__(self,
                  kl_per_partition,
                  sampler: Sampler,
+                 block_size=None,
                  name="gaussian_encoder",
                  **kwargs):
 
         super().__init__(name=name,
+                         block_size=block_size,
                          **kwargs)
 
         # ---------------------------------------------------------------------
@@ -90,7 +197,7 @@ class GaussianCoder(Coder):
         # The variance ratio at index i creates a chunk that has KL divergence 1/(i+1) times the overall KL divergence
         self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
                                                         shape=tf.TensorShape([None]),
-                                                        name="sum_averaged_variance_ratios",
+                                                        name="aux_variable_variance_ratios",
                                                         trainable=False)
 
         # Counts over how many batch elements we averaged over
@@ -106,10 +213,42 @@ class GaussianCoder(Coder):
     def update_auxiliary_variance_ratios(self,
                                          target_dist,
                                          coding_dist,
-                                         relative_tolerance=1e-4,
-                                         max_iters=10000,
-                                         learning_rate=0.001):
+                                         seed=42,
+                                         **kwargs):
+
         print(f"Updating {self.name}!")
+        if self.block_size is None:
+            self.update_block_auxiliary_variance_ratios(target_dist,
+                                                        coding_dist,
+                                                        **kwargs)
+
+        else:
+            # We split the distributions into blocks, and then batch them
+            target_loc, target_scale, coding_loc, coding_scale = self.split(target_dist.loc,
+                                                                            target_dist.scale,
+                                                                            coding_dist.loc,
+                                                                            coding_dist.scale,
+                                                                            seed=seed)
+
+            # We leave off the last block, because its size might be different to the rest
+            block_target = tfd.Normal(loc=tf.stack(target_loc[:-1], axis=0),
+                                      scale=tf.stack(target_scale[:-1], axis=0))
+
+            block_coder = tfd.Normal(loc=tf.stack(coding_loc[:-1], axis=0),
+                                     scale=tf.stack(coding_scale[:-1], axis=0))
+
+            self.update_block_auxiliary_variance_ratios(
+                target_dist=block_target,
+                coding_dist=block_coder,
+                **kwargs
+            )
+
+    def update_block_auxiliary_variance_ratios(self,
+                                               target_dist,
+                                               coding_dist,
+                                               relative_tolerance=1e-4,
+                                               max_iters=10000,
+                                               learning_rate=0.001):
         # Gather distribution statistics
         target_loc = target_dist.loc
         target_scale = target_dist.scale
@@ -202,7 +341,8 @@ class GaussianCoder(Coder):
                                                tf.math.pow(auxiliary_kl - self.kl_per_partition, 2),
                                                0.)
                         remaining_kl_loss = tf.where(total_kl - auxiliary_kl > self.kl_per_partition * (ratio - 1),
-                                                     tf.math.pow((total_kl - auxiliary_kl) - self.kl_per_partition * (ratio - 1), 2),
+                                                     tf.math.pow((total_kl - auxiliary_kl) - self.kl_per_partition * (
+                                                             ratio - 1), 2),
                                                      0.)
                         kl_loss = tf.reduce_mean(aux_kl_loss + remaining_kl_loss)
 
@@ -249,10 +389,57 @@ class GaussianCoder(Coder):
 
         self._initialized.assign(True)
 
-    def encode(self, target_dist, coding_dist, seed, update_sampler=False):
+    def encode(self, target_dist, coding_dist, seed, **kwargs):
+
+        print(f"Coding sample in {self.name}")
+        if self.block_size is None:
+            return self.encode_block(target_dist,
+                                     coding_dist,
+                                     seed,
+                                     **kwargs)
+
+        else:
+            samp_shape = target_dist.loc.shape
+
+            samples = []
+            indices = []
+
+            for block_index, \
+                (target_loc,
+                 target_scale,
+                 coding_loc,
+                 coding_scale) in enumerate(zip(*self.split(target_dist.loc,
+                                                            target_dist.scale,
+                                                            coding_dist.loc,
+                                                            coding_dist.scale,
+                                                            seed=seed))):
+                print(f"Coding sample in {self.name}/Block {block_index + 1}!")
+
+                # We add the extra dimension because encode is expecting
+                # images in batches of 1.
+                ind, samp = self.encode_block(target_dist=tfd.Normal(loc=target_loc[None, :],
+                                                                     scale=target_scale[None, :]),
+                                              coding_dist=tfd.Normal(loc=coding_loc[None, :],
+                                                                     scale=coding_scale[None, :]),
+                                              seed=seed,
+                                              **kwargs)
+
+                samples.append(samp[0, :])
+                indices = indices + ind
+
+            # Note the comma: merge returns a singleton list, which is why it is needed.
+            sample, = self.merge(samples, shape=samp_shape, seed=seed)
+
+            return indices, sample
+
+    def decode(self, coding_dist, indices, seed, **kwargs):
+        pass
+
+    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False):
 
         if not self._initialized:
-            raise CodingError("Coder has not been initialized yet, please call update_auxiliary_variance_ratios() first!")
+            raise CodingError(
+                "Coder has not been initialized yet, please call update_auxiliary_variance_ratios() first!")
 
         if target_dist.loc.shape[0] != 1:
             raise CodingError("For encoding, batch size must be 1.")
@@ -268,7 +455,8 @@ class GaussianCoder(Coder):
         if num_aux_variables > current_max:
             raise CodingError("KL divergence higher than auxiliary variables can account for. "
                               "Update auxiliary variable ratios with high-enough KL divergence."
-                              "Maximum possible KL divergence is {}.".format(current_max.numpy() * self.kl_per_partition))
+                              "Maximum possible KL divergence is {}.".format(
+                current_max.numpy() * self.kl_per_partition))
 
         # We iterate backward until the second entry in ratios. The first entry is 1.,
         # in which case we just draw the final sample.
@@ -318,7 +506,7 @@ class GaussianCoder(Coder):
 
         return indices, sample
 
-    def decode(self, coding_dist, indices, seed):
+    def decode_block(self, coding_dist, indices, seed, **kwargs):
         num_aux_variables = len(indices)
 
         indices.reverse()

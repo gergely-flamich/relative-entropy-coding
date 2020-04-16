@@ -9,6 +9,7 @@ import tensorflow_probability as tfp
 
 from rec.models.mnist_vae import MNISTVAE
 from rec.models.resnet_vae import BidirectionalResNetVAE
+from rec.models.large_resnet_vae import LargeResNetVAE
 
 from datasets import data_ingredient, load_dataset
 
@@ -84,15 +85,48 @@ def default_config(dataset_info):
             "learn_likelihood_scale": learn_likelihood_scale
         }
 
-
-
         learning_rate = 1e-3
         lamb = 0.1
         beta = 1.
 
         model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
                          f"/{'iaf' if use_iaf else 'gaussian'}/blocks_{num_res_blocks}/" \
-                         f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}_target_bpp_{target_bpp:.3f}"
+                         f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
+
+        model_save_dir += "_target_bpp_{target_bpp: .3f}" if lossy else "_lossless"
+
+    elif model == "large_resnet_vae":
+
+        likelihood_function = "laplace"
+        learn_likelihood_scale = False
+
+        lossy = True
+
+        sampler_args = {
+            "alpha": float('inf'),
+            "coding_bits": 10,
+        }
+
+        model_config = {
+            "sampler": "importance",
+            "sampler_args": sampler_args,
+            "latent_size": "variable",
+            "first_deterministic_filters": 160,
+            "first_stochastic_filters": 128,
+            "second_deterministic_filters": 160,
+            "second_stochastic_filters": 128,
+            "likelihood_function": likelihood_function,
+            "learn_likelihood_scale": learn_likelihood_scale
+        }
+
+        learning_rate = 1e-3
+        lamb = 0.1
+        beta = 1.
+
+        model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
+                         f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
+
+        model_save_dir += f"_target_bpp_{target_bpp: .3f}" if lossy else "_lossless"
 
     # Training-time configurations
     iters = 3000000
@@ -103,7 +137,7 @@ def default_config(dataset_info):
 
     # ELBO related stuff
     beta = 1.
-    anneal = False
+    anneal = False # Whether to anneal Beta at the start
     annealing_end = 50000  # Steps after which beta is fixed
     drop_learning_rate_after_iter = 1500000
     learning_rate_after_drop = 1e-5
@@ -242,6 +276,8 @@ def train_vae(dataset,
 
 @ex.capture
 def train_resnet_vae(dataset,
+                     model,
+
                      dataset_info,
                      model_save_dir,
                      log_dir,
@@ -278,7 +314,14 @@ def train_resnet_vae(dataset,
     # -------------------------------------------------------------------------
     # Create model
     # -------------------------------------------------------------------------
-    model = BidirectionalResNetVAE(**model_config)
+    if model == "resnet_vae":
+        model = BidirectionalResNetVAE(**model_config)
+
+    elif model == "large_resnet_vae":
+        model = LargeResNetVAE(**model_config)
+
+    else:
+        raise NotImplementedError
 
     # -------------------------------------------------------------------------
     # Create Optimizer
@@ -421,7 +464,10 @@ def train_model(model, _log):
         _log.info("Training a regular VAE!")
         train_vae(dataset=dataset)
 
-    elif model == "resnet_vae":
+    elif model in ["resnet_vae", "large_resnet_vae"]:
         _log.info("Training a ResNet VAE!")
         train_resnet_vae(dataset=dataset,
                          num_pixels=num_pixels)
+
+    else:
+        raise NotImplementedError

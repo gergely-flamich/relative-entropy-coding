@@ -6,7 +6,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
-from rec.coding import GaussianCoder
+from rec.coding import GaussianCoder, BeamSearchCoder
 from rec.coding.samplers import RejectionSampler, ImportanceSampler
 
 tfl = tf.keras.layers
@@ -28,6 +28,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                  deterministic_filters: int,
                  sampler: str,
                  sampler_args: dict = {},
+                 coder_args: dict = {},
                  kernel_size: Tuple[int, int] =(3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
@@ -101,20 +102,26 @@ class BidirectionalResidualBlock(tfl.Layer):
         # Stuff for compression
         # ---------------------------------------------------------------------
         if sampler == "rejection":
-            s = RejectionSampler(**sampler_args)
-
+            self.coder = GaussianCoder(sampler=RejectionSampler(**sampler_args),
+                                       kl_per_partition=kl_per_partition,
+                                       name=f"encoder_for_{self.name}",
+                                       **coder_args)
         elif sampler == "importance":
             # Setting alpha=inf will select the sample with
             # the best importance weights
-            s = ImportanceSampler(**sampler_args)
-
+            self.coder = GaussianCoder(sampler=ImportanceSampler(**sampler_args),
+                                       kl_per_partition=kl_per_partition,
+                                       name=f"encoder_for_{self.name}",
+                                       **coder_args)
+        elif sampler == "beam_search":
+            self.coder = BeamSearchCoder(kl_per_partition=kl_per_partition,
+                                         n_beams=sampler_args['n_beams'],
+                                         extra_samples=sampler_args['extra_samples'],
+                                         name=f"encoder_for_{self.name}",
+                                         **coder_args)
         else:
-            raise ModelError("Sampler must be one of ['rejection', 'importance'],"
+            raise ModelError("Sampler must be one of ['rejection', 'importance', 'beam_search'],"
                              f"but got {sampler}!")
-
-        self.coder = GaussianCoder(sampler=s,
-                                   kl_per_partition=kl_per_partition,
-                                   name=f"encoder_for_{self.name}")
 
         # ---------------------------------------------------------------------
         # Initialization flag
@@ -407,6 +414,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  num_res_blocks,
                  sampler,
                  sampler_args={},
+                 coder_args={},
                  likelihood_function="discretized_logistic",
                  learn_likelihood_scale=True,
                  first_kernel_size=(5, 5),
@@ -416,7 +424,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  deterministic_filters=160,
                  stochastic_filters=32,
                  use_iaf=False,
-                 kl_per_partition=8.,
+                 kl_per_partition=None,
                  latent_size="variable",
                  ema_decay=0.999,
                  name="resnet_vae",
@@ -480,6 +488,7 @@ class BidirectionalResNetVAE(tfk.Model):
                                                            deterministic_filters=self.deterministic_filters,
                                                            sampler=self.sampler_name,
                                                            sampler_args=sampler_args,
+                                                           coder_args=coder_args,
                                                            kernel_size=self.kernel_size,
                                                            is_last=res_block_idx == 0,  # Declare last residual block
                                                            use_iaf=self.use_iaf,
@@ -706,7 +715,7 @@ class BidirectionalResNetVAE(tfk.Model):
         for resnet_block in self.residual_blocks:
             indices, tensor = resnet_block(tensor,
                                            inference_pass=False,
-                                           encoder_args={"seed": seed, "update_sampler":update_sampler})
+                                           encoder_args={"seed": seed, "update_sampler": update_sampler})
 
             block_indices.append(indices)
 
