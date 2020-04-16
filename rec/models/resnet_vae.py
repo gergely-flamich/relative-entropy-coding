@@ -6,8 +6,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
-from rec.coding import GaussianCoder
-from rec.coding.beam_search_coder import BeamSearchCoder
+from rec.coding import GaussianCoder, BeamSearchCoder
 from rec.coding.samplers import RejectionSampler, ImportanceSampler
 
 tfl = tf.keras.layers

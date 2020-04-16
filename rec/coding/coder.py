@@ -424,12 +424,13 @@ class GaussianCoder(Coder):
                                               seed=seed,
                                               **kwargs)
 
-                samples.append(samp)
-                indices.append(ind)
+                samples.append(samp[0, :])
+                indices = indices + ind
 
-            sample = self.merge(samples, shape=samp_shape, seed=seed)
+            # Note the comma: merge returns a singleton list, which is why it is needed.
+            sample, = self.merge(samples, shape=samp_shape, seed=seed)
 
-            return sample, indices
+            return indices, sample
 
     def decode(self, coding_dist, indices, seed, **kwargs):
         pass
