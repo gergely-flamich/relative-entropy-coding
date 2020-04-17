@@ -1,4 +1,5 @@
 import glob
+import os
 
 from sacred import Ingredient
 
@@ -12,6 +13,8 @@ data_ingredient = Ingredient('dataset_info')
 @data_ingredient.config
 def data_config():
     dataset_name = "mnist"
+
+    return_img_name = False
 
     dataset_base_path = "/scratch/gf332/datasets/"
 
@@ -97,13 +100,13 @@ def data_config():
 
 @data_ingredient.capture
 def load_dataset(tfds_name,
-                 dataset_name,
                  dataset_path,
                  num_pixels,
                  split,
                  normalizer,
                  training_patch_size,
-                 test_split_name):
+                 test_split_name,
+                 return_image_name=False):
     if split == "test":
         split = test_split_name
 
@@ -116,8 +119,7 @@ def load_dataset(tfds_name,
                 raise RuntimeError("No training images found at '{}'.".format(dataset_path))
 
             dataset = tf.data.Dataset.from_tensor_slices(files)
-            dataset = dataset.map(
-                read_png, num_parallel_calls=16)
+            dataset = dataset.map(read_png, num_parallel_calls=16)
 
             if split == "train":
                 dataset = dataset.map(
@@ -130,14 +132,22 @@ def load_dataset(tfds_name,
     else:
         ds = tfds.load(tfds_name,
                        data_dir=dataset_path)
-        ds = ds[split]
-        ds = ds.map(lambda image: tf.cast(image["image"], tf.float32))
 
-    def prepare(image):
+        ds = ds[split].enumerate()
+        ds = ds.map(
+            lambda idx, im: (f"img_{idx}", tf.cast(im["image"], tf.float32))
+        )
+
+    def prepare(label, image):
+
         image = (image + 0.5) / normalizer
         image = tf.clip_by_value(image, 0., 1.) - 0.5
 
-        return image
+        if return_image_name:
+            return label, image
+
+        else:
+            return image
 
     ds = ds.map(prepare)
 
@@ -145,7 +155,7 @@ def load_dataset(tfds_name,
 
 
 @data_ingredient.capture
-def read_png(filename, dataset_name):
+def read_png(filename):
     """
     Loads a PNG image file. Taken from Balle's implementation
     """
@@ -153,4 +163,17 @@ def read_png(filename, dataset_name):
     image = tf.image.decode_image(image_raw, channels=3)
     image = tf.cast(image, tf.float32)
 
-    return image
+    basename = tf.py_function(lambda s: os.path.basename(s.numpy().decode('utf-8')),
+                              inp=[filename],
+                              Tout=tf.string)
+
+    return basename, image
+
+
+def write_png(image, filename):
+    # Quantize the image first
+    image = tf.round(image * 255)
+    image = tf.saturate_cast(image, tf.uint8)
+
+    image_string = tf.image.encode_png(image)
+    tf.io.write_file(filename, image_string)

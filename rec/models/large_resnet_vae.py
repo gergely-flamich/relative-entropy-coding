@@ -430,7 +430,7 @@ class LargeResNetVAE(tfk.Model):
         log_likelihood = self.likelihood_function(image, reconstruction)
         self.log_likelihood = tf.reduce_mean(log_likelihood)
 
-        return block_indices, reconstruction
+        return block_indices, reconstruction + 0.5
 
     def get_codelength(self, compressed_codes):
         codelength = 0.

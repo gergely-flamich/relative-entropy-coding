@@ -404,16 +404,20 @@ class GaussianCoder(Coder):
             samples = []
             indices = []
 
+            split_statistics = self.split(target_dist.loc,
+                                          target_dist.scale,
+                                          coding_dist.loc,
+                                          coding_dist.scale,
+                                          seed=seed)
+
+            num_blocks = len(split_statistics[0])
+
             for block_index, \
                 (target_loc,
                  target_scale,
                  coding_loc,
-                 coding_scale) in enumerate(zip(*self.split(target_dist.loc,
-                                                            target_dist.scale,
-                                                            coding_dist.loc,
-                                                            coding_dist.scale,
-                                                            seed=seed))):
-                print(f"Coding sample in {self.name}/Block {block_index + 1}!")
+                 coding_scale) in enumerate(zip(*split_statistics)):
+                print(f"Coding sample in {self.name}, block {block_index + 1}/{num_blocks}!")
 
                 # We add the extra dimension because encode is expecting
                 # images in batches of 1.
@@ -435,7 +439,7 @@ class GaussianCoder(Coder):
     def decode(self, coding_dist, indices, seed, **kwargs):
         pass
 
-    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False):
+    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False, verbose=False):
 
         if not self._initialized:
             raise CodingError(
@@ -479,7 +483,8 @@ class GaussianCoder(Coder):
                 index, auxiliary_sample = self.sampler.coded_sample(target=auxiliary_target,
                                                                     coder=auxiliary_coder,
                                                                     seed=seed)
-                print(f'Auxiliary sample {i} found at index {index}')
+                if verbose:
+                    print(f'Auxiliary sample {i} found at index {index}')
                 indices.append(index)
             seed += 1
 
@@ -501,7 +506,8 @@ class GaussianCoder(Coder):
             index, sample = self.sampler.coded_sample(target=target_dist,
                                                       coder=coding_dist,
                                                       seed=seed)
-            print('Auxiliary sample found at index {}'.format(index))
+            if verbose:
+                print('Auxiliary sample found at index {}'.format(index))
             indices.append(index)
 
         return indices, sample

@@ -93,7 +93,7 @@ def default_config(dataset_info):
                          f"/{'iaf' if use_iaf else 'gaussian'}/blocks_{num_res_blocks}/" \
                          f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
 
-        model_save_dir += "_target_bpp_{target_bpp: .3f}" if lossy else "_lossless"
+        model_save_dir += f"_target_bpp_{target_bpp:.3f}" if lossy else "_lossless"
 
     elif model == "large_resnet_vae":
 
@@ -126,7 +126,7 @@ def default_config(dataset_info):
         model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
                          f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
 
-        model_save_dir += f"_target_bpp_{target_bpp: .3f}" if lossy else "_lossless"
+        model_save_dir += f"_target_bpp_{target_bpp:.3f}" if lossy else "_lossless"
 
     # Training-time configurations
     iters = 3000000
