@@ -303,13 +303,17 @@ def resnet_vae_compress(model,
         # Measurements without compression
         ideal_reconstruction = model(image[None, :])
 
-        ideal_psnr = tf.image.psnr(ideal_reconstruction,
-                                   image + 0.5,
-                                   max_val=1.0)[0]
-
-        ideal_ms_ssim = tf.image.ssim_multiscale(ideal_reconstruction,
-                                                 image + 0.5,
-                                                 max_val=1.0)[0]
+        lossy = dataset_info["dataset_name"] in ["clic2019", "kodak"]
+        if lossy:
+            ideal_psnr = tf.image.psnr(ideal_reconstruction,
+                                       image + 0.5,
+                                       max_val=1.0)[0]
+            ideal_ms_ssim = tf.image.ssim_multiscale(ideal_reconstruction,
+                                                     image + 0.5,
+                                                     max_val=1.0)[0]
+        else:
+            ideal_psnr = -1.
+            ideal_ms_ssim = -1.
 
         if dataset_info["dataset_name"] == "clic2019":
             num_pixels = image.shape[1] * image.shape[2]
@@ -328,15 +332,6 @@ def resnet_vae_compress(model,
             block_indices, reconstruction = model.compress(image[None, :], update_sampler=update_sampler, seed=42)
         except CodingError:
             _log.info("Coding Error occurred.")
-            with open(output_filename, "a") as outfile:
-                outfile.write(', '.join([image_name] +
-                                        [str(float(v)) for v in [residual,
-                                                                 kld,
-                                                                 lossless_bpp,
-                                                                 lossy_bpp,
-                                                                 bpd,
-                                                                 -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]]))
-                outfile.write('\n')
             continue
         comp_time = time.time() - start_time
         comp_kld = model.kl_divergence(empirical=False, minimum_kl=0.)
@@ -346,8 +341,12 @@ def resnet_vae_compress(model,
         comp_lossy_bpp = comp_kld / (num_pixels * np.log(2))
         comp_bpd = comp_lossless_bpp / dataset_info["num_channels"]
 
-        psnr = tf.image.psnr(reconstruction, image + 0.5, max_val=1.0)[0]
-        ms_ssim = tf.image.ssim_multiscale(reconstruction, image + 0.5, max_val=1.0)[0]
+        if lossy:
+            psnr = tf.image.psnr(reconstruction, image + 0.5, max_val=1.0)[0]
+            ms_ssim = tf.image.ssim_multiscale(reconstruction, image + 0.5, max_val=1.0)[0]
+        else:
+            psnr = -1.
+            ms_ssim = -1.
 
         _log.info(f"KL divergence: {kld:.3f}, "
                   f"residuals: {residual:.3f}, "
