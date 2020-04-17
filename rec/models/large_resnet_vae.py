@@ -374,9 +374,6 @@ class LargeResNetVAE(tfk.Model):
 
     def compress(self, image, seed, update_sampler=False):
 
-        if not self._compressor_initialized:
-            raise ModelError("The compressor hasn't been initialized yet!")
-
         batch_size, height, width, _ = image.shape
         tensor = image
 
