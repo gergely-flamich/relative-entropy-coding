@@ -298,6 +298,8 @@ def resnet_vae_compress(model,
 
         # Image name is originally stored as a TF bytestring
         image_name = image_name.numpy().decode('utf-8')
+        if image_name.startswith('img_Tensor'):
+            image_name = dataset_info['dataset_name'] + '_sample'
         print(f"Compressing {image_name}!")
 
         # Measurements without compression
