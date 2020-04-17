@@ -16,10 +16,14 @@ class BeamSearchCoder(GaussianCoder):
                  kl_per_partition,
                  n_beams,
                  extra_samples=1.,
+                 extrapolate_auxiliary_ratios=True,
                  name="gaussian_encoder",
                  **kwargs):
 
-        super().__init__(name=name, kl_per_partition=kl_per_partition, sampler=None, **kwargs)
+        super().__init__(name=name,
+                         kl_per_partition=kl_per_partition,
+                         extrapolate_auxiliary_ratios=extrapolate_auxiliary_ratios,
+                         sampler=None, **kwargs)
         self.n_beams = n_beams
         self.n_samples = int(np.exp(kl_per_partition * extra_samples))
         self.big_prime = 10007
@@ -46,9 +50,6 @@ class BeamSearchCoder(GaussianCoder):
         return samples
 
     def encode_block(self, target_dist, coding_dist, seed, update_sampler=False):
-        if not self._initialized:
-            raise CodingError("Coder has not been initialized yet, please call update_auxiliary_variance_ratios() first!")
-
         if target_dist.loc.shape[0] != 1:
             raise CodingError("For encoding, batch size must be 1.")
 
@@ -56,20 +57,13 @@ class BeamSearchCoder(GaussianCoder):
         print('Encoding latent variable with KL={}'.format(total_kl))
         num_aux_variables = tf.cast(tf.math.ceil(total_kl / self.kl_per_partition), tf.int32)
 
-        # If there are more auxiliary variables needed than what we are already storing, we update our estimates
-        current_max = tf.shape(self.aux_variable_variance_ratios)[0]
-        if num_aux_variables > current_max:
-            raise CodingError("KL divergence higher than auxiliary variables can account for. "
-                              "Update auxiliary variable ratios with high-enough KL divergence."
-                              "Maximum possible KL divergence is {}.".format(current_max.numpy() * self.kl_per_partition))
-
         # We iterate backward until the second entry in ratios. The first entry is 1.,
         # in which case we just draw the final sample.
         n_dims = len(target_dist.loc.shape)
         cumulative_auxiliary_variance = 0.
         iteration = 0
         for i in range(num_aux_variables - 1, -1, -1):
-            aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
+            aux_variable_variance_ratio = self.get_auxiliary_ratio(i)
             auxiliary_var = aux_variable_variance_ratio * (tf.math.pow(coding_dist.scale, 2)
                                                            - cumulative_auxiliary_variance)
 
@@ -129,7 +123,7 @@ class BeamSearchCoder(GaussianCoder):
         cumulative_auxiliary_variance = 0.
         iteration = 0
         for i in range(num_aux_variables - 1, -1, -1):
-            aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
+            aux_variable_variance_ratio = self.get_auxiliary_ratio(i)
             auxiliary_var = aux_variable_variance_ratio * (tf.math.pow(coding_dist.scale, 2)
                                                            - cumulative_auxiliary_variance)
 

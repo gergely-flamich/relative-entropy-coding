@@ -51,23 +51,27 @@ def default_config(dataset_info):
 
     sampler = "rejection"
     sampler_args = {}
+    extrapolate_auxiliary_vars = True
     n_beams = 10
     extra_samples = 1.
 
     if sampler == "rejection":
         sampler_args = {
             "sample_buffer_size": 10000,
-            "r_buffer_size": 1000000
+            "r_buffer_size": 1000000,
+            "extrapolate_auxiliary_vars": extrapolate_auxiliary_vars
         }
     elif sampler == "importance":
         sampler_args = {
             "alpha": np.inf,
-            "coding_bits": kl_per_partition / np.log(2)
+            "coding_bits": kl_per_partition / np.log(2),
+            "extrapolate_auxiliary_vars": extrapolate_auxiliary_vars
         }
     elif sampler == 'beam_search':
         sampler_args = {
             "n_beams": n_beams,
-            "extra_samples": extra_samples
+            "extra_samples": extra_samples,
+            "extrapolate_auxiliary_vars": extrapolate_auxiliary_vars
         }
 
     if model == "vae":
@@ -304,7 +308,7 @@ def resnet_vae_compress(model,
         try:
             block_indices, reconstruction = model.compress(image[None, :], update_sampler=update_sampler, seed=42)
         except CodingError:
-            _log.info("Coding Error occurred. KL divergence too high")
+            _log.info("Coding Error occurred.")
             with open(output_filename, "a") as outfile:
                 outfile.write(', '.join([image_name] +
                                         [str(float(v)) for v in [residual,

@@ -13,6 +13,7 @@ from rec.coding.samplers import Sampler, RejectionSampler, ImportanceSampler
 tfl = tf.keras.layers
 tfd = tfp.distributions
 
+AUX_RATIO_POWER_LAW = -0.7864636765648174
 
 def sigmoid_inverse(x):
     if tf.reduce_any(x < 0.) or tf.reduce_any(x > 1.):
@@ -172,6 +173,7 @@ def get_conditional_target(target, coder, auxiliary_var, auxiliary_sample):
 class GaussianCoder(Coder):
     def __init__(self,
                  kl_per_partition,
+                 extrapolate_auxiliary_ratios,
                  sampler: Sampler,
                  block_size=None,
                  name="gaussian_encoder",
@@ -195,20 +197,37 @@ class GaussianCoder(Coder):
         # The auxiliary variables are always scaled w.r.t the coding distribution, i.e.
         # Var[A_i] = R_i * Var_{Z_i ~ P(Z_i)}[Z_i]
         # The variance ratio at index i creates a chunk that has KL divergence 1/(i+1) times the overall KL divergence
-        self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
-                                                        shape=tf.TensorShape([None]),
-                                                        name="aux_variable_variance_ratios",
-                                                        trainable=False)
+        self.extrapolate_auxiliary_ratios = extrapolate_auxiliary_ratios
+        if not self.extrapolate_auxiliary_ratios:
+            self.aux_variable_variance_ratios = tf.Variable(tf.constant([1.], dtype=tf.float32),
+                                                            shape=tf.TensorShape([None]),
+                                                            name="aux_variable_variance_ratios",
+                                                            trainable=False)
 
-        # Counts over how many batch elements we averaged over
-        self.average_counts = tf.Variable(tf.constant([1.], dtype=tf.float32),
-                                          shape=tf.TensorShape([None]),
-                                          name="average_counts",
-                                          trainable=False)
+            # Counts over how many batch elements we averaged over
+            self.average_counts = tf.Variable(tf.constant([1.], dtype=tf.float32),
+                                              shape=tf.TensorShape([None]),
+                                              name="average_counts",
+                                              trainable=False)
 
-        self._initialized = tf.Variable(False,
-                                        name="coder_initialized",
-                                        trainable=False)
+            self._initialized = tf.Variable(False,
+                                            name="coder_initialized",
+                                            trainable=False)
+
+    def get_auxiliary_ratio(self, index):
+        if self.extrapolate_auxiliary_ratios:
+            return np.power(index + 1., AUX_RATIO_POWER_LAW)
+        else:
+            if not self._initialized:
+                raise CodingError("Coder has not been initialized yet, please call"
+                                  "update_auxiliary_variance_ratios() first"
+                                  " or use extrapolation")
+            if index >= tf.shape(self.aux_variable_variance_ratios)[0]:
+                raise CodingError("KL divergence higher than auxiliary variables can account for. "
+                                  "Update auxiliary variable ratios with high-enough KL divergence."
+                                  "Maximum possible number of partitions is {}."
+                                  "Requested {}".format(self.aux_variable_variance_ratios.shape[0], index + 1))
+            return self.aux_variable_variance_ratios[index]
 
     def update_auxiliary_variance_ratios(self,
                                          target_dist,
@@ -440,11 +459,6 @@ class GaussianCoder(Coder):
         pass
 
     def encode_block(self, target_dist, coding_dist, seed, update_sampler=False, verbose=False):
-
-        if not self._initialized:
-            raise CodingError(
-                "Coder has not been initialized yet, please call update_auxiliary_variance_ratios() first!")
-
         if target_dist.loc.shape[0] != 1:
             raise CodingError("For encoding, batch size must be 1.")
 
@@ -454,18 +468,10 @@ class GaussianCoder(Coder):
         print('Encoding latent variable with KL={}'.format(total_kl))
         num_aux_variables = tf.cast(tf.math.ceil(total_kl / self.kl_per_partition), tf.int32)
 
-        # If there are more auxiliary variables needed than what we are already storing, we update our estimates
-        current_max = tf.shape(self.aux_variable_variance_ratios)[0]
-        if num_aux_variables > current_max:
-            raise CodingError("KL divergence higher than auxiliary variables can account for. "
-                              "Update auxiliary variable ratios with high-enough KL divergence."
-                              "Maximum possible KL divergence is {}.".format(
-                current_max.numpy() * self.kl_per_partition))
-
         # We iterate backward until the second entry in ratios. The first entry is 1.,
         # in which case we just draw the final sample.
         for i in range(num_aux_variables - 1, 0, -1):
-            aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
+            aux_variable_variance_ratio = self.get_auxiliary_ratio(i)
             auxiliary_var = aux_variable_variance_ratio * tf.math.pow(coding_dist.scale, 2)
 
             auxiliary_target = get_auxiliary_target(target=target_dist,
@@ -517,7 +523,7 @@ class GaussianCoder(Coder):
 
         indices.reverse()
         for i in range(num_aux_variables - 1, 0, -1):
-            aux_variable_variance_ratio = self.aux_variable_variance_ratios[i]
+            aux_variable_variance_ratio = self.get_auxiliary_ratio(i)
             auxiliary_var = aux_variable_variance_ratio * tf.math.pow(coding_dist.scale, 2)
 
             auxiliary_coder = get_auxiliary_coder(coder=coding_dist,
