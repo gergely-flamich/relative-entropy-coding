@@ -259,6 +259,7 @@ def resnet_vae_compress(model,
 
         # Swap in Exponential Moving Average shadow variables for evaluation
         model.swap_in_ema_variables()
+        model_dir = model_save_dir
     else:
         model_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
         model.load_weights(f"{model_dir}/compressor_initialized").expect_partial()
