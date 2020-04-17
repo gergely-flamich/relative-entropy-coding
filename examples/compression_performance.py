@@ -214,6 +214,7 @@ def resnet_vae_compress(model,
                         dataset,
                         dataset_info,
                         kl_per_partition,
+                        extrapolate_auxiliary_vars,
                         output_file,
                         save_reconstructions,
                         reconstruction_dir_name,
@@ -242,13 +243,30 @@ def resnet_vae_compress(model,
     # -------------------------------------------------------------------------
     # Restore model
     # -------------------------------------------------------------------------
-    compressor_initialized_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
-    model.load_weights(f"{compressor_initialized_dir}/compressor_initialized").expect_partial()
+    if extrapolate_auxiliary_vars:
+        optimizer = tf.optimizers.Adamax()
+        ckpt = tf.train.Checkpoint(model=model,
+                                   optimizer=optimizer)
+
+        manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=10)
+
+        # Restore previous session
+        ckpt.restore(manager.latest_checkpoint).expect_partial()
+        if manager.latest_checkpoint:
+            _log.info(f"Restored model from {manager.latest_checkpoint}")
+        else:
+            _log.info("Initializing model from scratch.")
+
+        # Swap in Exponential Moving Average shadow variables for evaluation
+        model.swap_in_ema_variables()
+    else:
+        model_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
+        model.load_weights(f"{model_dir}/compressor_initialized").expect_partial()
 
     # -------------------------------------------------------------------------
     # Compress images
     # -------------------------------------------------------------------------
-    output_filename = os.path.join(compressor_initialized_dir, output_file)
+    output_filename = os.path.join(model_dir, output_file)
     with open(output_filename, "w") as outfile:
         outfile.write(', '.join(['name',
                                  'residual',
@@ -272,7 +290,7 @@ def resnet_vae_compress(model,
     if update_sampler:
         for _, image in dataset:
             model.compress(image[None, :], update_sampler=update_sampler, seed=42)
-        model.save_weights(f"{compressor_initialized_dir}/compressor_initialized_sampler_updated")
+        model.save_weights(f"{model_dir}/compressor_initialized_sampler_updated")
         return
 
     for image_name, image in dataset:
@@ -364,7 +382,7 @@ def resnet_vae_compress(model,
 
         if save_reconstructions:
             print("saving")
-            write_png(reconstruction[0], f"{compressor_initialized_dir}/"
+            write_png(reconstruction[0], f"{model_dir}/"
                                          f"{reconstruction_dir_name}/"
                                          f"{image_name}")
 
