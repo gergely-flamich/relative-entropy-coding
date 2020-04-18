@@ -1,6 +1,29 @@
 from distutils.util import convert_path
-
+from distutils.extension import Extension
 from setuptools import setup, find_packages
+import numpy
+
+# https://stackoverflow.com/questions/4505747/how-should-i-structure-a-python-package-that-contains-cython-code
+try:
+    from Cython.Build import build_ext
+except ImportError:
+    use_cython = False
+else:
+    use_cython = True
+
+cmdclass = {}
+ext_modules = []
+
+if use_cython:
+    ext_modules += [
+        Extension("rec.io.entropy_coding", ["rec/io/entropy_coding.pyx"]),
+    ]
+    cmdclass.update({"build_ext": build_ext})
+
+else:
+    ext_modules += [
+        Extension("rec.io.entropy_coding", ["rec/io/entropy_coding.c"]),
+    ]
 
 
 def readme() -> str:
@@ -29,5 +52,8 @@ setup(name="relative-entropy-coding",
       install_requires=[
           "tensorflow-gpu",
           "tensorflow-probability",
-      ]
+      ],
+      ext_modules=ext_modules,
+      cmdclass=cmdclass,
+      include_dirs=[numpy.get_include()],
       )

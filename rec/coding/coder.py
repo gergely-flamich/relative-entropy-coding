@@ -448,7 +448,7 @@ class GaussianCoder(Coder):
                                               **kwargs)
 
                 samples.append(samp[0, :])
-                indices = indices + ind
+                indices.append(ind)
 
             # Note the comma: merge returns a singleton list, which is why it is needed.
             sample, = self.merge(samples, shape=samp_shape, seed=seed)
