@@ -1,4 +1,5 @@
 aux_ratios.txt
+*.npy
 
 # Log directory
 logs/

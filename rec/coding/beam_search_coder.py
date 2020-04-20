@@ -49,7 +49,7 @@ class BeamSearchCoder(GaussianCoder):
         # return tf.stack([dist.sample(n_samples,) for _ in range(index_matrix.shape[0])], axis=1)
         return samples
 
-    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False):
+    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False, numpy=True):
         if target_dist.loc.shape[0] != 1:
             raise CodingError("For encoding, batch size must be 1.")
 
@@ -113,7 +113,12 @@ class BeamSearchCoder(GaussianCoder):
                                                          tf.reduce_sum(
                                                              target_dist.log_prob(beams[0] + coding_dist.loc) -
                                                              coding_dist.log_prob(beams[0] + coding_dist.loc))))
-        return list(beam_indices[0, :]), beams[0] + coding_dist.loc
+
+        indices = beam_indices[0, :]
+        if numpy:
+            indices = indices.numpy()
+
+        return list(indices), beams[0] + coding_dist.loc
 
     def decode_block(self, coding_dist, indices, seed):
         num_aux_variables = len(indices)

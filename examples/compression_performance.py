@@ -25,10 +25,13 @@ def default_config(dataset_info):
     mode = "compress"
 
     if mode == "compress" or mode == "update_sampler":
+        compression_seed = 42
         num_test_images = 1
-        output_file = 'results.csv'
+
+        output_base_dir = f'{dataset_info["dataset_name"]}/'
+        output_file = f'{output_base_dir}/results.csv'
         save_reconstructions = True
-        reconstruction_dir_name = 'reconstructions'
+        reconstruction_dir_name = f'{output_base_dir}/reconstructions'
 
     elif mode == "initialize":
         num_test_images = 300
@@ -218,7 +221,10 @@ def resnet_vae_compress(model,
                         output_file,
                         save_reconstructions,
                         reconstruction_dir_name,
+                        compression_seed,
                         _log):
+
+    os.makedirs(reconstruction_dir_name, exist_ok=True)
     # -------------------------------------------------------------------------
     # Batch the dataset
     # Important note: dataset_info.return_img_name is assumed to be true
@@ -290,7 +296,7 @@ def resnet_vae_compress(model,
 
     if update_sampler:
         for _, image in dataset:
-            model.compress(image[None, :], update_sampler=update_sampler, seed=42)
+            model.compress(image[None, :], update_sampler=update_sampler, seed=compression_seed)
         model.save_weights(f"{model_dir}/compressor_initialized_sampler_updated")
         return
 
@@ -331,7 +337,17 @@ def resnet_vae_compress(model,
         # Measurements with compression
         start_time = time.time()
         try:
-            block_indices, reconstruction = model.compress(image[None, :], update_sampler=update_sampler, seed=42)
+            block_indices, reconstruction = model.compress(image[None, :], update_sampler=update_sampler,
+                                                           seed=compression_seed)
+
+            print(block_indices)
+            np.save(f"{model_dir}/"
+                    f"{reconstruction_dir_name}/"
+                    f"{image_name}_block_indices.npy", np.array(block_indices))
+
+            # compressed_code = get_compressed_code(seed=compression_seed,
+            #                                       image_shape=image.shape,
+            #                                       block_indices=block_indices)
         except CodingError:
             _log.info("Coding Error occurred.")
             continue
@@ -387,6 +403,19 @@ def resnet_vae_compress(model,
             write_png(reconstruction[0], f"{model_dir}/"
                                          f"{reconstruction_dir_name}/"
                                          f"{image_name}")
+
+
+def get_compressed_code(seed,
+                        image_shape,
+                        block_indices,
+                        max_index_bits,
+                        use_arithmetic_coding_for_indices=False):
+    # We need to store the sizes of the blocks
+    block_sizes = list(map(len, block_indices))
+
+    # Get the number of auxiliary variables drawn in each block
+    num_aux_vars = [list(map(len, block)) for block in block_indices]
+
 
 @ex.automain
 def compress_data(model, mode, _log):

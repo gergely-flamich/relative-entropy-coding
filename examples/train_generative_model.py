@@ -99,22 +99,27 @@ def default_config(dataset_info):
 
         likelihood_function = "laplace"
         learn_likelihood_scale = False
+        use_gdn = True
 
         lossy = True
 
         sampler_args = {
             "alpha": float('inf'),
             "coding_bits": 10,
+            "n_beams": 10,
+            "extra_samples": 1.,
+            "extrapolate_auxiliary_vars": True,
         }
 
         model_config = {
-            "sampler": "importance",
+            "use_gdn": use_gdn,
+            "sampler": "beam_search",
             "sampler_args": sampler_args,
             "latent_size": "variable",
-            "first_deterministic_filters": 160,
-            "first_stochastic_filters": 128,
-            "second_deterministic_filters": 160,
-            "second_stochastic_filters": 128,
+            "first_deterministic_filters": 192,
+            "first_stochastic_filters": 320,
+            "second_deterministic_filters": 192,
+            "second_stochastic_filters": 192,
             "likelihood_function": likelihood_function,
             "learn_likelihood_scale": learn_likelihood_scale
         }
@@ -390,8 +395,6 @@ def train_resnet_vae(dataset,
                 current_beta = beta * tf.minimum(1., tf.cast(ckpt.step, tf.float32) / annealing_end)
             else:
                 current_beta = beta
-
-
 
             loss = -log_likelihood + current_beta * kld
 
