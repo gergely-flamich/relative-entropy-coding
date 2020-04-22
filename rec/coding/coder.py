@@ -457,6 +457,8 @@ class GaussianCoder(Coder):
             return indices, sample
 
     def decode(self, coding_dist, indices, seed, **kwargs):
+
+        print(f"Decoding sample in {self.name}")
         if self.block_size is None:
             return self.decode_block(coding_dist,
                                      indices,
@@ -470,15 +472,18 @@ class GaussianCoder(Coder):
                                                     coding_dist.scale,
                                                     seed=seed)
             block_samples = []
+            num_blocks = len(coding_locs)
 
-            for inds, coding_loc, coding_scale in zip(indices, coding_locs, coding_scales):
+            for block_index, (inds, coding_loc, coding_scale) in enumerate(zip(indices, coding_locs, coding_scales)):
 
+                print(f"Decoding sample in {self.name}, block {block_index + 1}/{num_blocks}!")
                 samp = self.decode_block(coding_dist=tfd.Normal(loc=coding_loc[None, :],
                                                                 scale=coding_scale[None, :]),
                                          seed=seed,
+                                         indices=inds,
                                          **kwargs)
 
-                block_samples.append(samp)
+                block_samples.append(samp[0, :])
 
             # Note the comma: merge returns a singleton list, which is why it is needed.
             sample, = self.merge(block_samples, shape=samp_shape, seed=seed)

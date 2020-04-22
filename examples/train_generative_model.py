@@ -9,7 +9,7 @@ import tensorflow_probability as tfp
 
 from rec.models.mnist_vae import MNISTVAE
 from rec.models.resnet_vae import BidirectionalResNetVAE
-from rec.models.large_resnet_vae import LargeResNetVAE
+from rec.models.large_resnet_vae_new import LargeResNetVAE
 
 from datasets import data_ingredient, load_dataset
 
@@ -117,9 +117,9 @@ def default_config(dataset_info):
             "sampler_args": sampler_args,
             "latent_size": "variable",
             "first_deterministic_filters": 192,
-            "first_stochastic_filters": 320,
-            "second_deterministic_filters": 192,
-            "second_stochastic_filters": 192,
+            "first_stochastic_filters": 192,
+            "second_deterministic_filters": 128,
+            "second_stochastic_filters": 128,
             "likelihood_function": likelihood_function,
             "learn_likelihood_scale": learn_likelihood_scale
         }
