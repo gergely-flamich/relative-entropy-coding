@@ -144,8 +144,8 @@ def default_config(dataset_info):
     beta = 1.
     anneal = False # Whether to anneal Beta at the start
     annealing_end = 50000  # Steps after which beta is fixed
-    drop_learning_rate_after_iter = 1500000
-    learning_rate_after_drop = 1e-5
+    drop_learning_rate_after_iter = 50000
+    learning_rate_drop_rate = 0.3
 
     # Logging
     tensorboard_log_freq = 1000
@@ -169,7 +169,7 @@ def train_vae(dataset,
               beta,
               annealing_end,
               drop_learning_rate_after_iter,
-              learning_rate_after_drop,
+              learning_rate_drop_rate,
               _log):
     # -------------------------------------------------------------------------
     # Prepare the dataset
@@ -227,8 +227,8 @@ def train_vae(dataset,
         ckpt.step.assign_add(1)
 
         # Decrease learning rate after a while
-        if int(ckpt.step) == drop_learning_rate_after_iter:
-            learn_rate.assign(learning_rate_after_drop)
+        #if int(ckpt.step) == drop_learning_rate_after_iter:
+        #    learn_rate.assign(learning_rate_after_drop)
 
         with tf.GradientTape() as tape:
 
@@ -298,7 +298,7 @@ def train_resnet_vae(dataset,
                      anneal,
                      annealing_end,
                      drop_learning_rate_after_iter,
-                     learning_rate_after_drop,
+                     learning_rate_drop_rate,
                      num_pixels,
                      _log,
                      lossy,
@@ -373,7 +373,16 @@ def train_resnet_vae(dataset,
 
         # Decrease learning rate after a while
         if int(ckpt.step) == drop_learning_rate_after_iter:
-            learn_rate.assign(learning_rate_after_drop)
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+
+        if int(ckpt.step) == 2 * drop_learning_rate_after_iter:
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+
+        if int(ckpt.step) == 3 * drop_learning_rate_after_iter:
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+
+        if int(ckpt.step) == 4 * drop_learning_rate_after_iter:
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
 
         with tf.GradientTape() as tape:
 
@@ -398,7 +407,7 @@ def train_resnet_vae(dataset,
 
             loss = -log_likelihood + current_beta * kld
 
-        if tf.math.is_nan(loss) or tf.math.is_inf(loss):
+        if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
             raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
 
         gradients = tape.gradient(loss, model.trainable_variables)
