@@ -3,7 +3,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose
+from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, GDN
 
 from rec.coding import GaussianCoder, BeamSearchCoder
 from rec.coding.samplers import RejectionSampler, ImportanceSampler
@@ -32,6 +32,8 @@ class LargeResNetVAE(tfk.Model):
                  sampler,
                  sampler_args={},
                  coder_args={},
+                 use_gdn = True,
+                 distribution="gaussian",
                  likelihood_function="laplace",
                  learn_likelihood_scale=False,
                  first_kernel_size=(5, 5),
@@ -53,6 +55,9 @@ class LargeResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         # Assign hyperparamteres
         # ---------------------------------------------------------------------
+
+        self.distribution = distribution
+
         self.sampler_name = str(sampler)
         self.learn_likelihood_scale = learn_likelihood_scale
 
@@ -94,17 +99,23 @@ class LargeResNetVAE(tfk.Model):
                                   strides=self.first_strides,
                                   filters=self.first_deterministic_filters,
                                   padding="same"),
-            tf.nn.elu,
+
+            (GDN(inverse=False, name="inf_gdn_0") if use_gdn else tf.nn.elu),
+
             ReparameterizedConv2D(kernel_size=self.kernel_size,
                                   strides=self.strides,
                                   filters=self.first_deterministic_filters,
                                   padding="same"),
-            tf.nn.elu,
+
+            (GDN(inverse=False, name="inf_gdn_1") if use_gdn else tf.nn.elu),
+
             ReparameterizedConv2D(kernel_size=self.kernel_size,
                                   strides=self.strides,
                                   filters=self.first_deterministic_filters,
                                   padding="same"),
-            tf.nn.elu,
+
+            (GDN(inverse=False, name="inf_gdn_2") if use_gdn else tf.nn.elu),
+
             ReparameterizedConv2D(kernel_size=self.kernel_size,
                                   strides=self.strides,
                                   filters=self.first_deterministic_filters,
@@ -118,27 +129,38 @@ class LargeResNetVAE(tfk.Model):
                                            strides=self.strides,
                                            filters=self.first_deterministic_filters,
                                            padding="same"),
-            tf.nn.elu,
+
+            (GDN(inverse=True, name="gen_gdn_0") if use_gdn else tf.nn.elu),
+
             ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
                                            strides=self.strides,
                                            filters=self.first_deterministic_filters,
                                            padding="same"),
-            tf.nn.elu,
+
+            (GDN(inverse=True, name="gen_gdn_1") if use_gdn else tf.nn.elu),
+
             ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
                                            strides=self.strides,
                                            filters=self.first_deterministic_filters,
                                            padding="same"),
-            tf.nn.elu,
+
+            (GDN(inverse=True, name="gen_gdn_2") if use_gdn else tf.nn.elu),
+
             ReparameterizedConv2DTranspose(kernel_size=self.first_kernel_size,
                                            strides=self.first_strides,
                                            filters=3,
-                                           padding="same")
+                                           padding="same"),
         ]
 
         # The second deterministic inference block downsamples by another 4x4
         self.second_infer_block = [
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
+            ReparameterizedConv2D(kernel_size=(3, 3),
                                   strides=(1, 1),
+                                  filters=self.second_deterministic_filters,
+                                  padding="same"),
+            tf.nn.elu,
+            ReparameterizedConv2D(kernel_size=self.kernel_size,
+                                  strides=self.strides,
                                   filters=self.second_deterministic_filters,
                                   padding="same"),
             tf.nn.elu,
@@ -156,6 +178,11 @@ class LargeResNetVAE(tfk.Model):
                                            padding="same"),
             tf.nn.elu,
             ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
+                                           strides=self.strides,
+                                           filters=self.second_deterministic_filters,
+                                           padding="same"),
+            tf.nn.elu,
+            ReparameterizedConv2DTranspose(kernel_size=(3, 3),
                                            strides=(1, 1),
                                            filters=self.first_deterministic_filters,
                                            padding="same")
@@ -168,6 +195,7 @@ class LargeResNetVAE(tfk.Model):
             sampler=self.sampler_name,
             sampler_args=sampler_args,
             coder_args=coder_args,
+            distribution=distribution,
             kernel_size=self.kernel_size,
             is_last=False,
             use_iaf=False,
@@ -181,6 +209,7 @@ class LargeResNetVAE(tfk.Model):
             sampler=self.sampler_name,
             sampler_args=sampler_args,
             coder_args=coder_args,
+            distribution=distribution,
             kernel_size=self.kernel_size,
             is_last=True,
             use_iaf=False,
@@ -213,7 +242,7 @@ class LargeResNetVAE(tfk.Model):
 
         base = tf.reshape(self._generative_base, [1, 1, 1, self.second_deterministic_filters])
 
-        return tf.tile(base, [batch_size, height // 32, width // 32, 1])
+        return tf.tile(base, [batch_size, height // 64, width // 64, 1])
 
     @property
     def likelihood_function(self):
@@ -435,7 +464,7 @@ class LargeResNetVAE(tfk.Model):
             codelength += resnet_block.coder.get_codelength(compressed_code)
         return codelength
 
-    def decompress(self, image_shape, block_indices, seed, lossless=True):
+    def decompress(self, image_shape, block_indices, seed, lossless=False):
 
         batch_size = 1
         height, width, _ = image_shape

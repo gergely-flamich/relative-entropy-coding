@@ -123,7 +123,8 @@ def load_dataset(tfds_name,
 
             if split == "train":
                 dataset = dataset.map(
-                    lambda x: tf.image.random_crop(x, (training_patch_size, training_patch_size, 3)))
+                    lambda l, x: (l, tf.image.random_crop(x, (training_patch_size, training_patch_size, 3)))
+                )
 
                 num_pixels = training_patch_size * training_patch_size
 

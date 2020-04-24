@@ -9,7 +9,7 @@ import tensorflow_probability as tfp
 
 from rec.models.mnist_vae import MNISTVAE
 from rec.models.resnet_vae import BidirectionalResNetVAE
-from rec.models.large_resnet_vae import LargeResNetVAE
+from rec.models.large_resnet_vae_new import LargeResNetVAE
 
 from datasets import data_ingredient, load_dataset
 
@@ -97,33 +97,40 @@ def default_config(dataset_info):
 
     elif model == "large_resnet_vae":
 
+        distribution = "gaussian"
         likelihood_function = "laplace"
         learn_likelihood_scale = False
+        use_gdn = True
 
         lossy = True
 
         sampler_args = {
             "alpha": float('inf'),
             "coding_bits": 10,
+            "n_beams": 10,
+            "extra_samples": 1.,
+            "extrapolate_auxiliary_vars": True,
         }
 
         model_config = {
-            "sampler": "importance",
+            "use_gdn": use_gdn,
+            "distribution": distribution,
+            "sampler": "beam_search",
             "sampler_args": sampler_args,
             "latent_size": "variable",
-            "first_deterministic_filters": 160,
-            "first_stochastic_filters": 128,
-            "second_deterministic_filters": 160,
+            "first_deterministic_filters": 192,
+            "first_stochastic_filters": 192,
+            "second_deterministic_filters": 128,
             "second_stochastic_filters": 128,
             "likelihood_function": likelihood_function,
             "learn_likelihood_scale": learn_likelihood_scale
         }
 
         learning_rate = 1e-3
-        lamb = 0.1
+        lamb = 0.01
         beta = 1.
 
-        model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
+        model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/{distribution}/" \
                          f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
 
         model_save_dir += f"_target_bpp_{target_bpp:.3f}" if lossy else "_lossless"
@@ -139,8 +146,8 @@ def default_config(dataset_info):
     beta = 1.
     anneal = False # Whether to anneal Beta at the start
     annealing_end = 50000  # Steps after which beta is fixed
-    drop_learning_rate_after_iter = 1500000
-    learning_rate_after_drop = 1e-5
+    drop_learning_rate_after_iter = 50000
+    learning_rate_drop_rate = 0.3
 
     # Logging
     tensorboard_log_freq = 1000
@@ -164,7 +171,7 @@ def train_vae(dataset,
               beta,
               annealing_end,
               drop_learning_rate_after_iter,
-              learning_rate_after_drop,
+              learning_rate_drop_rate,
               _log):
     # -------------------------------------------------------------------------
     # Prepare the dataset
@@ -222,8 +229,8 @@ def train_vae(dataset,
         ckpt.step.assign_add(1)
 
         # Decrease learning rate after a while
-        if int(ckpt.step) == drop_learning_rate_after_iter:
-            learn_rate.assign(learning_rate_after_drop)
+        #if int(ckpt.step) == drop_learning_rate_after_iter:
+        #    learn_rate.assign(learning_rate_after_drop)
 
         with tf.GradientTape() as tape:
 
@@ -293,7 +300,7 @@ def train_resnet_vae(dataset,
                      anneal,
                      annealing_end,
                      drop_learning_rate_after_iter,
-                     learning_rate_after_drop,
+                     learning_rate_drop_rate,
                      num_pixels,
                      _log,
                      lossy,
@@ -368,7 +375,16 @@ def train_resnet_vae(dataset,
 
         # Decrease learning rate after a while
         if int(ckpt.step) == drop_learning_rate_after_iter:
-            learn_rate.assign(learning_rate_after_drop)
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+
+        if int(ckpt.step) == 2 * drop_learning_rate_after_iter:
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+
+        if int(ckpt.step) == 3 * drop_learning_rate_after_iter:
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+
+        if int(ckpt.step) == 4 * drop_learning_rate_after_iter:
+            learn_rate.assign(learn_rate * learning_rate_drop_rate)
 
         with tf.GradientTape() as tape:
 
@@ -391,11 +407,9 @@ def train_resnet_vae(dataset,
             else:
                 current_beta = beta
 
-
-
             loss = -log_likelihood + current_beta * kld
 
-        if tf.math.is_nan(loss) or tf.math.is_inf(loss):
+        if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
             raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
 
         gradients = tape.gradient(loss, model.trainable_variables)

@@ -15,6 +15,7 @@ tfd = tfp.distributions
 
 AUX_RATIO_POWER_LAW = -0.7864636765648174
 
+
 def sigmoid_inverse(x):
     if tf.reduce_any(x < 0.) or tf.reduce_any(x > 1.):
         raise ValueError(f"x = {x} was not in the sigmoid function's range ([0, 1])!")
@@ -448,7 +449,7 @@ class GaussianCoder(Coder):
                                               **kwargs)
 
                 samples.append(samp[0, :])
-                indices = indices + ind
+                indices.append(ind)
 
             # Note the comma: merge returns a singleton list, which is why it is needed.
             sample, = self.merge(samples, shape=samp_shape, seed=seed)
@@ -456,9 +457,40 @@ class GaussianCoder(Coder):
             return indices, sample
 
     def decode(self, coding_dist, indices, seed, **kwargs):
-        pass
 
-    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False, verbose=False):
+        print(f"Decoding sample in {self.name}")
+        if self.block_size is None:
+            return self.decode_block(coding_dist,
+                                     indices,
+                                     seed,
+                                     **kwargs)
+
+        else:
+            samp_shape = coding_dist.loc.shape
+
+            coding_locs, coding_scales = self.split(coding_dist.loc,
+                                                    coding_dist.scale,
+                                                    seed=seed)
+            block_samples = []
+            num_blocks = len(coding_locs)
+
+            for block_index, (inds, coding_loc, coding_scale) in enumerate(zip(indices, coding_locs, coding_scales)):
+
+                print(f"Decoding sample in {self.name}, block {block_index + 1}/{num_blocks}!")
+                samp = self.decode_block(coding_dist=tfd.Normal(loc=coding_loc[None, :],
+                                                                scale=coding_scale[None, :]),
+                                         seed=seed,
+                                         indices=inds,
+                                         **kwargs)
+
+                block_samples.append(samp[0, :])
+
+            # Note the comma: merge returns a singleton list, which is why it is needed.
+            sample, = self.merge(block_samples, shape=samp_shape, seed=seed)
+
+            return sample
+
+    def encode_block(self, target_dist, coding_dist, seed, update_sampler=False, verbose=False, numpy=True):
         if target_dist.loc.shape[0] != 1:
             raise CodingError("For encoding, batch size must be 1.")
 
@@ -491,6 +523,10 @@ class GaussianCoder(Coder):
                                                                     seed=seed)
                 if verbose:
                     print(f'Auxiliary sample {i} found at index {index}')
+
+                if numpy:
+                    index = index.numpy()
+
                 indices.append(index)
             seed += 1
 
@@ -514,6 +550,10 @@ class GaussianCoder(Coder):
                                                       seed=seed)
             if verbose:
                 print('Auxiliary sample found at index {}'.format(index))
+
+            if numpy:
+                index = index.numpy()
+
             indices.append(index)
 
         return indices, sample
