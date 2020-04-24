@@ -23,20 +23,33 @@ class BidirectionalResidualBlock(tfl.Layer):
     Implements a bidirectional Resnet Block
     """
 
+    AVAILABLE_DISTRIBUTIONS = {
+        "gaussian": tfd.Normal,
+        "cauchy": tfd.Cauchy,
+    }
+
     def __init__(self,
                  stochastic_filters: int,
                  deterministic_filters: int,
                  sampler: str,
                  sampler_args: dict = {},
                  coder_args: dict = {},
-                 kernel_size: Tuple[int, int] =(3, 3),
+                 distribution: str = "gaussian",
+                 kernel_size: Tuple[int, int] = (3, 3),
                  use_iaf: bool = False,
                  is_last: bool = False,
-                 kl_per_partition = 8.,
+                 kl_per_partition=8.,
                  name: str = "bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
                          **kwargs)
+
+        if distribution not in self.AVAILABLE_DISTRIBUTIONS:
+            raise ValueError(f"Distribution must be one of {self.AVAILABLE_DISTRIBUTIONS}, "
+                             f"but {distribution} was given!")
+
+        self.distribution_type = distribution
+        self.distribution = self.AVAILABLE_DISTRIBUTIONS[distribution]
 
         # Number of filters for the stochastic layers
         self.stochastic_filters = stochastic_filters
@@ -152,7 +165,15 @@ class BidirectionalResidualBlock(tfl.Layer):
         if empirical:
             kld = self.empirical_kld
         else:
-            kld = tfd.kl_divergence(self.posterior, self.prior)
+            if self.distribution_type == "gaussian":
+                kld = tfd.kl_divergence(self.posterior, self.prior)
+            elif self.distribution_type == "cauchy":
+                kld = (tf.math.log(tf.math.square(self.prior.scale + self.posterior.scale) +
+                                   tf.math.squared_difference(self.prior.loc, self.posterior.loc))
+                       - tf.math.log(4. * self.prior.scale) - tf.math.log(self.posterior.scale))
+
+            else:
+                raise NotImplementedError
 
         # The parameters are shared per channel, so we first calculate the average
         # across the batch, width and height axes, then apply the minimum KL constraint,
@@ -294,8 +315,8 @@ class BidirectionalResidualBlock(tfl.Layer):
             self.prior_loc = self.prior_loc_head(tensor)
             self.prior_scale = tf.exp(self.prior_log_scale_head(tensor))
 
-            self.prior = tfd.Normal(loc=self.prior_loc,
-                                    scale=self.prior_scale)
+            self.prior = self.distribution(loc=self.prior_loc,
+                                           scale=self.prior_scale)
             # -----------------------------------------------------------------
             # Training
             # -----------------------------------------------------------------
@@ -307,8 +328,8 @@ class BidirectionalResidualBlock(tfl.Layer):
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
 
                 # Sample from posterior. The loc and scale are automagically calculated using property methods
-                self.posterior = tfd.Normal(loc=self.posterior_loc,
-                                            scale=self.posterior_scale)
+                self.posterior = self.distribution(loc=self.posterior_loc,
+                                                   scale=self.posterior_scale)
 
                 if self._initialized:
                     latent_code = self.posterior.sample()
@@ -345,14 +366,13 @@ class BidirectionalResidualBlock(tfl.Layer):
             # Compression
             # -----------------------------------------------------------------
             if encoder_args is not None:
-
                 # Calculate second part of posterior statistics
                 self.gen_posterior_loc = self.gen_posterior_loc_head(tensor)
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
 
                 # The loc and scale are automagically calculated using property methods
-                self.posterior = tfd.Normal(loc=self.posterior_loc,
-                                            scale=self.posterior_scale)
+                self.posterior = self.distribution(loc=self.posterior_loc,
+                                                   scale=self.posterior_scale)
                 indices, latent_code = self.coder.encode(self.posterior, self.prior, **encoder_args)
 
             # -----------------------------------------------------------------
@@ -523,7 +543,7 @@ class BidirectionalResNetVAE(tfk.Model):
 
         likelihood_scale = tf.math.exp(self.likelihood_log_scale)
 
-        def discretized_logistic(reference, reconstruction, binsize=1./256.):
+        def discretized_logistic(reference, reconstruction, binsize=1. / 256.):
 
             # Discretize the output
             discretized_input = tf.math.floor(reference / binsize) * binsize
@@ -545,7 +565,7 @@ class BidirectionalResNetVAE(tfk.Model):
             return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
 
         # TODO
-        def discretized_laplace_log_prob(reference, reconstruction, binsize=1./256.):
+        def discretized_laplace_log_prob(reference, reconstruction, binsize=1. / 256.):
 
             # Discretize the output
             discretized_input = tf.math.floor(reference / binsize) * binsize
@@ -696,7 +716,7 @@ class BidirectionalResNetVAE(tfk.Model):
         # Note that the ResNet blocks are ordered according to the order of a generative pass,
         # so we iterate the list in reverse
         for resnet_block in self.residual_blocks[::-1]:
-            tensor = resnet_block(tensor, inference_pass=True,)
+            tensor = resnet_block(tensor, inference_pass=True, )
 
         # Once the inference pass is complete, we code each of the blocks sequentially
         tensor = self.generative_base(batch_size=batch_size,
@@ -726,7 +746,6 @@ class BidirectionalResNetVAE(tfk.Model):
         for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
             codelength += resnet_block.coder.get_codelength(compressed_code)
         return codelength
-
 
     def decompress(self, compressed_codes, seed, lossless=True):
 

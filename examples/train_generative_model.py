@@ -97,6 +97,7 @@ def default_config(dataset_info):
 
     elif model == "large_resnet_vae":
 
+        distribution = "gaussian"
         likelihood_function = "laplace"
         learn_likelihood_scale = False
         use_gdn = True
@@ -113,6 +114,7 @@ def default_config(dataset_info):
 
         model_config = {
             "use_gdn": use_gdn,
+            "distribution": distribution,
             "sampler": "beam_search",
             "sampler_args": sampler_args,
             "latent_size": "variable",
@@ -125,10 +127,10 @@ def default_config(dataset_info):
         }
 
         learning_rate = 1e-3
-        lamb = 0.1
+        lamb = 0.01
         beta = 1.
 
-        model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/" \
+        model_save_dir = f"{model_save_base_dir}/{dataset_info['dataset_name']}/{model}/{distribution}/" \
                          f"beta_{beta:.3f}_lamb_{lamb:.3f}_{likelihood_function}"
 
         model_save_dir += f"_target_bpp_{target_bpp:.3f}" if lossy else "_lossless"

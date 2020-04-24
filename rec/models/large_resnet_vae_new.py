@@ -33,6 +33,7 @@ class LargeResNetVAE(tfk.Model):
                  sampler_args={},
                  coder_args={},
                  use_gdn = True,
+                 distribution="gaussian",
                  likelihood_function="laplace",
                  learn_likelihood_scale=False,
                  first_kernel_size=(5, 5),
@@ -54,6 +55,9 @@ class LargeResNetVAE(tfk.Model):
         # ---------------------------------------------------------------------
         # Assign hyperparamteres
         # ---------------------------------------------------------------------
+
+        self.distribution = distribution
+
         self.sampler_name = str(sampler)
         self.learn_likelihood_scale = learn_likelihood_scale
 
@@ -191,6 +195,7 @@ class LargeResNetVAE(tfk.Model):
             sampler=self.sampler_name,
             sampler_args=sampler_args,
             coder_args=coder_args,
+            distribution=distribution,
             kernel_size=self.kernel_size,
             is_last=False,
             use_iaf=False,
@@ -204,6 +209,7 @@ class LargeResNetVAE(tfk.Model):
             sampler=self.sampler_name,
             sampler_args=sampler_args,
             coder_args=coder_args,
+            distribution=distribution,
             kernel_size=self.kernel_size,
             is_last=True,
             use_iaf=False,

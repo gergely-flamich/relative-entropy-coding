@@ -10,7 +10,7 @@ import tensorflow as tf
 import numpy as np
 
 from rec.models.resnet_vae import BidirectionalResNetVAE
-from rec.models.large_resnet_vae import LargeResNetVAE
+from rec.models.large_resnet_vae_new import LargeResNetVAE
 
 from datasets import data_ingredient, load_dataset, write_png
 from rec.coding.utils import CodingError
@@ -122,13 +122,14 @@ def default_config(dataset_info):
         num_res_blocks = 2
 
         model_config = {
+            "use_gdn": True,
             "latent_size": "variable",
             "sampler": sampler,
             "sampler_args": sampler_args,
             "coder_args": coder_args,
-            "first_deterministic_filters": 160,
-            "first_stochastic_filters": 128,
-            "second_deterministic_filters": 160,
+            "first_deterministic_filters": 192,
+            "first_stochastic_filters": 192,
+            "second_deterministic_filters": 128,
             "second_stochastic_filters": 128,
             "kl_per_partition": kl_per_partition
         }
@@ -245,7 +246,7 @@ def resnet_vae_compress(model,
         raise NotImplementedError
 
     # Initialize_model_weights
-    model(tf.zeros((1, 32, 32, dataset_info["num_channels"])))
+    model(tf.zeros((1, 256, 256, dataset_info["num_channels"])))
 
     # -------------------------------------------------------------------------
     # Restore model
