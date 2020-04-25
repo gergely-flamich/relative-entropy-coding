@@ -4,9 +4,8 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, GDN
+from rec.core.utils import gaussian_blur
 
-from rec.coding import GaussianCoder, BeamSearchCoder
-from rec.coding.samplers import RejectionSampler, ImportanceSampler
 
 from .resnet_vae import ModelError, BidirectionalResidualBlock
 
@@ -25,7 +24,9 @@ class LargeResNetVAE(tfk.Model):
     AVAILABLE_LIKELIHOODS = [
         "discretized_logistic",
         "gaussian",
-        "laplace"
+        "laplace",
+        "ms-ssim",
+        "ms-ssim-laplace",
     ]
 
     def __init__(self,
@@ -251,6 +252,7 @@ class LargeResNetVAE(tfk.Model):
 
         def discretized_logistic(reference, reconstruction, binsize=1. / 256.):
 
+            reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
             # Discretize the output
             discretized_input = tf.math.floor(reference / binsize) * binsize
             discretized_input = (discretized_input - reconstruction) / likelihood_scale
@@ -265,10 +267,24 @@ class LargeResNetVAE(tfk.Model):
             likelihood = tfd.Normal(loc=reconstruction, scale=likelihood_scale)
             return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
 
-        def laplace_log_prob(reference, reconstruction):
+        def laplace_log_prob(reference, reconstruction, blur=False):
             likelihood = tfd.Laplace(loc=reconstruction, scale=likelihood_scale)
+            log_prob = likelihood.log_prob(reference)
 
-            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+            if blur:
+                # Parameters taken from https://github.com/tensorflow/tensorflow/blob/e5bf8de410005de06a7ff5393fafdf832ef1d4ad/tensorflow/python/ops/image_ops_impl.py#L3314-L3438
+                log_prob = gaussian_blur(log_prob, kernel_size=11, sigma=8.)
+
+            return tf.reduce_sum(log_prob, [1, 2, 3])
+
+        def ms_ssim_pseudo_log_prob(reference, reconstruction):
+            ms_ssim = tf.image.ssim_multiscale(reference,
+                                               reconstruction,
+                                               max_val=1.)
+
+            # The ms-ssim is averaged across the non-batch dimensions, so we multipy back up
+            # Note: 1. - ms_ssim would correspond to a negative log prob, hence we reverse it.
+            return (ms_ssim - 1.) * tf.cast(tf.reduce_prod(reference.shape[1:]), tf.float32)
 
         if self._likelihood_function == "discretized_logistic":
             return discretized_logistic
@@ -278,6 +294,18 @@ class LargeResNetVAE(tfk.Model):
 
         elif self._likelihood_function == "laplace":
             return laplace_log_prob
+
+        elif self._likelihood_function == "ms-ssim":
+            return ms_ssim_pseudo_log_prob
+
+        elif self._likelihood_function == "ms-ssim-laplace":
+            def combined_loss(a, b, alpha=0.6):
+                ms_ssim_contribution = alpha * ms_ssim_pseudo_log_prob(a, b)
+                laplace_contribution = (1. - alpha) * laplace_log_prob(a, b, blur=True)
+
+                return ms_ssim_contribution + laplace_contribution
+
+            return combined_loss
         else:
             raise NotImplementedError
 
@@ -317,15 +345,15 @@ class LargeResNetVAE(tfk.Model):
         for layer in self.first_gen_block:
             tensor = layer(tensor)
 
-        reconstruction = tf.clip_by_value(tensor, -0.5 + 1. / 512., 0.5 - 1. / 512.)
-
         # Calculate log likelihood
-        log_likelihood = self.likelihood_function(input, reconstruction)
+        log_likelihood = self.likelihood_function(input, tensor)
         self.log_likelihood = tf.reduce_mean(log_likelihood)
 
         # If it's the initialization round, create our EMA shadow variables
         if not self.is_ema_variables_initialized:
             self.create_ema_variables()
+
+        reconstruction = tf.clip_by_value(tensor, -0.5 + 1. / 512., 0.5 - 1. / 512.)
 
         return reconstruction + 0.5
 

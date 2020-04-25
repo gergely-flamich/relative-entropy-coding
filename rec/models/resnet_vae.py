@@ -328,7 +328,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
 
                 # Sample from posterior. The loc and scale are automagically calculated using property methods
-                self.posterior = self.distribution(loc=self.posterior_loc,
+                self.posterior = tfd.Normal(loc=self.posterior_loc,
                                                    scale=self.posterior_scale)
 
                 if self._initialized:
@@ -371,7 +371,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
 
                 # The loc and scale are automagically calculated using property methods
-                self.posterior = self.distribution(loc=self.posterior_loc,
+                self.posterior = tfd.Normal(loc=self.posterior_loc,
                                                    scale=self.posterior_scale)
                 indices, latent_code = self.coder.encode(self.posterior, self.prior, **encoder_args)
 
