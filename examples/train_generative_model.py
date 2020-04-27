@@ -45,7 +45,7 @@ def default_config(dataset_info):
         target_bpp = 0.1
 
         # Start adjusting Beta after the given number of iterations
-        adjust_beta_after_iters = 50000
+        adjust_beta_after_iters = 100000
 
     if model == "vae":
         latent_size = 50
@@ -139,13 +139,13 @@ def default_config(dataset_info):
     iters = 3000000
 
     shuffle_buffer_size = 5000
-    batch_size = 4
+    batch_size = 8
     num_prefetch = 32
 
     # ELBO related stuff
     beta = 1.
     anneal = False # Whether to anneal Beta at the start
-    annealing_end = 50000  # Steps after which beta is fixed
+    annealing_end = 100000  # Steps after which beta is fixed
     drop_learning_rate_after_iter = 50000
     learning_rate_drop_rate = 0.3
 
@@ -212,6 +212,9 @@ def train_vae(dataset,
     # -------------------------------------------------------------------------
     # Training Loop
     # -------------------------------------------------------------------------
+
+    def train_step():
+        pass
 
     # Initialize the model weights
     model(tf.zeros([1, 28, 28, 1]))
@@ -361,6 +364,43 @@ def train_resnet_vae(dataset,
     # Training Loop
     # -------------------------------------------------------------------------
 
+    @tf.function
+    def train_step(batch, model, beta):
+        print("Retracing train step!")
+        with tf.GradientTape() as tape:
+
+            reconstruction = model(batch, training=True)
+
+            log_likelihood = model.log_likelihood
+            kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
+
+            bpp = kld / (num_pixels * log_2)
+            if lossy and int(ckpt.step) > adjust_beta_after_iters:
+                if bpp > target_bpp + 3e-2:
+                    beta.assign(beta / 1.0003)
+
+                elif bpp < target_bpp - 3e-2:
+                    beta.assign(beta * 1.0003)
+
+            # Linearly annealed beta
+            if anneal:
+                current_beta = beta * tf.minimum(1., tf.cast(ckpt.step, tf.float32) / annealing_end)
+            else:
+                current_beta = beta
+
+            negative_per_pixel_likelihood = -log_likelihood / (num_pixels * 3)
+            loss = current_beta * negative_per_pixel_likelihood + bpp
+
+        gradients = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+
+        # Once the model parameters are updated, we also update their exponential moving average.
+        model.update_ema_variables()
+
+        true_kls = model.kl_divergence(empirical=True, minimum_kl=0., reduce=False)
+
+        return loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls
+
     # Restore previous session
     ckpt.restore(manager.latest_checkpoint)
     if manager.latest_checkpoint:
@@ -374,56 +414,30 @@ def train_resnet_vae(dataset,
         ckpt.step.assign_add(1)
 
         # Decrease learning rate after a while
-        if int(ckpt.step) == drop_learning_rate_after_iter:
-            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+        # if int(ckpt.step) == drop_learning_rate_after_iter:
+        #     learn_rate.assign(learn_rate * learning_rate_drop_rate)
+        #
+        # if int(ckpt.step) == 2 * drop_learning_rate_after_iter:
+        #     learn_rate.assign(learn_rate * learning_rate_drop_rate)
+        #
+        # if int(ckpt.step) == 3 * drop_learning_rate_after_iter:
+        #     learn_rate.assign(learn_rate * learning_rate_drop_rate)
+        #
+        # if int(ckpt.step) == 4 * drop_learning_rate_after_iter:
+        #     learn_rate.assign(learn_rate * learning_rate_drop_rate)
 
-        if int(ckpt.step) == 2 * drop_learning_rate_after_iter:
-            learn_rate.assign(learn_rate * learning_rate_drop_rate)
+        loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls = train_step(batch, model, beta)
 
-        if int(ckpt.step) == 3 * drop_learning_rate_after_iter:
-            learn_rate.assign(learn_rate * learning_rate_drop_rate)
-
-        if int(ckpt.step) == 4 * drop_learning_rate_after_iter:
-            learn_rate.assign(learn_rate * learning_rate_drop_rate)
-
-        with tf.GradientTape() as tape:
-
-            reconstruction = model(batch, training=True)
-
-            log_likelihood = model.log_likelihood
-            kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
-
-            bpp = kld / (num_pixels * log_2)
-            if lossy and int(ckpt.step) > adjust_beta_after_iters:
-                if bpp > target_bpp + 1e-2:
-                    beta.assign(beta * 1.001)
-
-                elif bpp < target_bpp - 1e-2:
-                    beta.assign(beta / 1.001)
-
-            # Linearly annealed beta
-            if anneal:
-                current_beta = beta * tf.minimum(1., tf.cast(ckpt.step, tf.float32) / annealing_end)
-            else:
-                current_beta = beta
-
-            loss = -log_likelihood + current_beta * kld
+        true_kl = tf.reduce_sum(true_kls)
 
         if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
             raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
-
-        gradients = tape.gradient(loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-
-        # Once the model parameters are updated, we also update their exponential moving average.
-        model.update_ema_variables()
 
         if int(ckpt.step) % tensorboard_log_freq == 1:
             # Save model
             save_path = manager.save()
             _log.info(f"Step {int(ckpt.step)}: Saved model to {save_path}")
 
-            true_kl = model.kl_divergence(empirical=True, minimum_kl=0.)
             true_elbo = log_likelihood - kld
 
             with summary_writer.as_default():
@@ -466,7 +480,7 @@ def train_resnet_vae(dataset,
                 tfs.image(name="Original", data=batch + 0.5, step=ckpt.step)
                 tfs.image(name="Reconstruction", data=reconstruction, step=ckpt.step)
 
-                for i, kl in enumerate(model.kl_divergence(empirical=True, minimum_kl=0., reduce=False)):
+                for i, kl in enumerate(true_kls):
                     tfs.scalar(name=f"KL/dim_{i + 1}", data=tf.squeeze(kl), step=ckpt.step)
 
 

@@ -96,29 +96,29 @@ class LargeResNetVAE(tfk.Model):
         # Note: we don't apply an ELU at the end of the block, this will happen
         # in the residual block
         self.first_infer_block = [
-            ReparameterizedConv2D(kernel_size=self.first_kernel_size,
-                                  strides=self.first_strides,
+            ReparameterizedConv2D(kernel_size=(5, 5),
+                                  strides=2,
                                   filters=self.first_deterministic_filters,
                                   padding="same"),
 
             (GDN(inverse=False, name="inf_gdn_0") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
+            ReparameterizedConv2D(kernel_size=(5, 5),
+                                  strides=2,
                                   filters=self.first_deterministic_filters,
                                   padding="same"),
 
             (GDN(inverse=False, name="inf_gdn_1") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
+            ReparameterizedConv2D(kernel_size=(5, 5),
+                                  strides=2,
                                   filters=self.first_deterministic_filters,
                                   padding="same"),
 
             (GDN(inverse=False, name="inf_gdn_2") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
+            ReparameterizedConv2D(kernel_size=(5, 5),
+                                  strides=2,
                                   filters=self.first_deterministic_filters,
                                   padding="same"),
         ]
@@ -126,29 +126,29 @@ class LargeResNetVAE(tfk.Model):
         # The first deterministic generative block is the pseudoinverse of the inference block
         self.first_gen_block = [
             tf.nn.elu,
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
+            ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                           strides=2,
                                            filters=self.first_deterministic_filters,
                                            padding="same"),
 
             (GDN(inverse=True, name="gen_gdn_0") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
+            ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                           strides=2,
                                            filters=self.first_deterministic_filters,
                                            padding="same"),
 
             (GDN(inverse=True, name="gen_gdn_1") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
+            ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                           strides=2,
                                            filters=self.first_deterministic_filters,
                                            padding="same"),
 
             (GDN(inverse=True, name="gen_gdn_2") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2DTranspose(kernel_size=self.first_kernel_size,
-                                           strides=self.first_strides,
+            ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                           strides=2,
                                            filters=3,
                                            padding="same"),
         ]
@@ -156,35 +156,35 @@ class LargeResNetVAE(tfk.Model):
         # The second deterministic inference block downsamples by another 4x4
         self.second_infer_block = [
             ReparameterizedConv2D(kernel_size=(3, 3),
-                                  strides=(1, 1),
+                                  strides=1,
                                   filters=self.second_deterministic_filters,
                                   padding="same"),
             tf.nn.elu,
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
+            ReparameterizedConv2D(kernel_size=(5, 5),
+                                  strides=2,
                                   filters=self.second_deterministic_filters,
                                   padding="same"),
             tf.nn.elu,
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
+            ReparameterizedConv2D(kernel_size=(5, 5),
+                                  strides=2,
                                   filters=self.second_deterministic_filters,
                                   padding="same"),
         ]
 
         self.second_gen_block = [
             tf.nn.elu,
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
+            ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                           strides=2,
                                            filters=self.second_deterministic_filters,
                                            padding="same"),
             tf.nn.elu,
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
+            ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                           strides=2,
                                            filters=self.second_deterministic_filters,
                                            padding="same"),
             tf.nn.elu,
             ReparameterizedConv2DTranspose(kernel_size=(3, 3),
-                                           strides=(1, 1),
+                                           strides=1,
                                            filters=self.first_deterministic_filters,
                                            padding="same")
         ]
@@ -264,18 +264,23 @@ class LargeResNetVAE(tfk.Model):
             return tf.reduce_sum(log_likelihood, [1, 2, 3])
 
         def gaussian_log_prob(reference, reconstruction):
-            likelihood = tfd.Normal(loc=reconstruction, scale=likelihood_scale)
-            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+            # likelihood = tfd.Normal(loc=reconstruction, scale=likelihood_scale)
+            # return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3]) * 255.**2.
+
+            return -tf.reduce_sum(tf.math.squared_difference(reference, reconstruction) / likelihood_scale,
+                                 [1, 2, 3]) * 255.**2.
 
         def laplace_log_prob(reference, reconstruction, blur=False):
-            likelihood = tfd.Laplace(loc=reconstruction, scale=likelihood_scale)
-            log_prob = likelihood.log_prob(reference)
+            # likelihood = tfd.Laplace(loc=reconstruction, scale=likelihood_scale)
+            # log_prob = likelihood.log_prob(reference)
+
+            log_prob = tf.abs(reconstruction - reference) / likelihood_scale
 
             if blur:
                 # Parameters taken from https://github.com/tensorflow/tensorflow/blob/e5bf8de410005de06a7ff5393fafdf832ef1d4ad/tensorflow/python/ops/image_ops_impl.py#L3314-L3438
                 log_prob = gaussian_blur(log_prob, kernel_size=11, sigma=8.)
 
-            return tf.reduce_sum(log_prob, [1, 2, 3])
+            return tf.reduce_sum(log_prob, [1, 2, 3]) * 255.
 
         def ms_ssim_pseudo_log_prob(reference, reconstruction):
             ms_ssim = tf.image.ssim_multiscale(reference,
@@ -284,7 +289,7 @@ class LargeResNetVAE(tfk.Model):
 
             # The ms-ssim is averaged across the non-batch dimensions, so we multipy back up
             # Note: 1. - ms_ssim would correspond to a negative log prob, hence we reverse it.
-            return (ms_ssim - 1.) * tf.cast(tf.reduce_prod(reference.shape[1:]), tf.float32)
+            return (ms_ssim - 1.) * tf.cast(tf.reduce_prod(reference.shape[1:]), tf.float32) * 255.
 
         if self._likelihood_function == "discretized_logistic":
             return discretized_logistic
@@ -299,7 +304,7 @@ class LargeResNetVAE(tfk.Model):
             return ms_ssim_pseudo_log_prob
 
         elif self._likelihood_function == "ms-ssim-laplace":
-            def combined_loss(a, b, alpha=0.6):
+            def combined_loss(a, b, alpha=0.84):
                 ms_ssim_contribution = alpha * ms_ssim_pseudo_log_prob(a, b)
                 laplace_contribution = (1. - alpha) * laplace_log_prob(a, b, blur=True)
 
