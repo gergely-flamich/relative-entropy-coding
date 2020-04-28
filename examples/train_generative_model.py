@@ -431,9 +431,6 @@ def train_resnet_vae(dataset,
         if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
             raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
 
-        # Once the model parameters are updated, we also update their exponential moving average.
-        model.update_ema_variables()
-
         if int(ckpt.step) % tensorboard_log_freq == 1:
             # Save model
             save_path = manager.save()
