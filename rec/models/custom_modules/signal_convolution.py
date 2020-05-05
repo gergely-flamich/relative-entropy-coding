@@ -24,7 +24,7 @@ class SignalConv2D(tfl.Layer):
                  strides_up=1,
                  padding="zeros",
                  extra_pad_end=True,
-                 use_bias=False,
+                 use_bias=True,
                  dft_kernel_parametrization=True,
                  name="signal_conv2d",
                  **kwargs):
@@ -97,6 +97,7 @@ class SignalConv2D(tfl.Layer):
         kernel_initializer = tf.initializers.VarianceScaling()
 
         if self._kernel_shape == (1, 1) or not self.dft_kernel_parametrization:
+            tf.print(f"Building kernel without DCT parameterization! Shape: {kernel_shape}")
             kernel_init = kernel_initializer(kernel_shape)
 
         else:
@@ -121,7 +122,67 @@ class SignalConv2D(tfl.Layer):
 
         super().build(input_shape)
 
-    @tf.function
+    def corr_down_explicit(self, inputs, kernel, padding):
+        strides = self._padded_tuple([self.strides_down, self.strides_down], 1)
+        padding = self._padded_tuple(padding, (0, 0))
+
+        return tf.nn.conv2d(inputs,
+                               kernel,
+                               strides=strides,
+                               padding=padding,
+                               data_format="NHWC")
+
+    # Needed because of reflection padding
+    def corr_down_valid(self, inputs, kernel):
+
+        outputs = tf.nn.convolution(inputs,
+                                    kernel,
+                                    strides=[self.strides_down, self.strides_down],
+                                    padding="VALID",
+                                    data_format="NHWC")
+
+        return outputs
+
+    def conv_up_explicit(self, inputs, kernel, prepadding):
+        # Pretend the the input filters are the output filters and vice versa
+        kernel = tf.transpose(kernel, [0, 1, 3, 2])
+        input_shape = inputs.shape
+        padding = 4 * [(0, 0)]
+        output_shape = [input_shape[0], None, None, self.filters]
+        spatial_axes = range(1, 3)
+
+        if self.extra_pad_end:
+            get_length = lambda l, s, k, p: l * s + ((k - 1) - p)
+        else:
+            get_length = lambda l, s, k, p: l * s + ((k - 1) - (s - 1) - p)
+
+        for i, a in enumerate(spatial_axes):
+            padding[a] = (
+                prepadding[i][0] * self.strides_up + self._kernel_shape[i] // 2,
+                prepadding[i][1] * self.strides_up + (self._kernel_shape[i] - 1) // 2
+            )
+
+            output_shape[a] = get_length(input_shape[a],
+                                         self.strides_up,
+                                         self._kernel_shape[i],
+                                         sum(padding[a]))
+
+        strides = self._padded_tuple([self.strides_up, self.strides_up], 1)
+
+        outputs = tf.compat.v1.nn.conv2d_backprop_input(output_shape,
+                                                        kernel,
+                                                        inputs,
+                                                        strides=strides,
+                                                        padding=padding,
+                                                        data_format="NHWC")
+
+        if self.strides_down > 1:
+            slices = tuple(slice(None, None, self.strides_down, self.strides_down))
+            slices = self._padded_tuple(slices, slice(None))
+            outputs = outputs[slices]
+
+        return outputs
+
     def call(self, inputs):
         inputs = tf.convert_to_tensor(inputs)
         outputs = inputs
@@ -158,54 +219,14 @@ class SignalConv2D(tfl.Layer):
         # Perform the convolution
         # ---------------------------------------------------------------------
         if corr and self.strides_up == 1 and not all(p[0] == p[1] == 0 for p in padding):
-            strides = self._padded_tuple([self.strides_down, self.strides_down], 1)
-            padding = self._padded_tuple(padding, (0, 0))
+            outputs = self.corr_down_explicit(outputs, kernel, padding)
 
-            outputs = tf.nn.conv2d(outputs,
-                                   kernel,
-                                   strides=strides,
-                                   padding=padding,
-                                   data_format="NHWC")
+        elif corr and self.strides_up == 1 and all(p[0] == p[1] == 0 for p in padding):
+            outputs = self.corr_down_valid(outputs, kernel)
 
         elif not corr:
             # Explicit up-convolution
-
-            # Pretend the the input filters are the output filters and vice versa
-            kernel = tf.transpose(kernel, [0, 1, 3, 2])
-            input_shape = outputs.shape
-            padding = 4 * [(0, 0)]
-            output_shape = [input_shape[0], None, None, self.filters]
-            spatial_axes = range(1, 3)
-
-            if self.extra_pad_end:
-                get_length = lambda l, s, k, p: l * s + ((k - 1) - p)
-            else:
-                get_length = lambda l, s, k, p: l * s + ((k - 1) - (s - 1) - p)
-
-            for i, a in enumerate(spatial_axes):
-                padding[a] = (
-                    prepadding[i][0] * self.strides_up + self._kernel_shape[i] // 2,
-                    prepadding[i][1] * self.strides_up + (self._kernel_shape[i] - 1) // 2
-                )
-
-                output_shape[a] = get_length(input_shape[a],
-                                             self.strides_up,
-                                             self._kernel_shape[i],
-                                             sum(padding[a]))
-
-            strides = self._padded_tuple([self.strides_up, self.strides_up], 1)
-
-            outputs = tf.compat.v1.nn.conv2d_backprop_input(output_shape,
-                                                            kernel,
-                                                            outputs,
-                                                            strides=strides,
-                                                            padding=padding,
-                                                            data_format="NHWC")
-
-            if self.strides_down > 1:
-                slices = tuple(slice(None, None, self.strides_down, self.strides_down))
-                slices = self._padded_tuple(slices, slice(None))
-                outputs = outputs[slices]
+            outputs = self.conv_up_explicit(outputs, kernel, prepadding)
 
         else:
             raise NotImplementedError
