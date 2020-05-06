@@ -22,8 +22,9 @@ class BeamSearchCoder(GaussianCoder):
 
         super().__init__(name=name,
                          kl_per_partition=kl_per_partition,
+                         sampler=None,
                          extrapolate_auxiliary_ratios=extrapolate_auxiliary_ratios,
-                         sampler=None, **kwargs)
+                         **kwargs)
         self.n_beams = n_beams
         self.n_samples = int(np.exp(kl_per_partition * extra_samples))
         self.big_prime = 10007

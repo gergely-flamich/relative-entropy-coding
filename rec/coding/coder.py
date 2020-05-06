@@ -174,8 +174,8 @@ def get_conditional_target(target, coder, auxiliary_var, auxiliary_sample):
 class GaussianCoder(Coder):
     def __init__(self,
                  kl_per_partition,
-                 extrapolate_auxiliary_ratios,
                  sampler: Sampler,
+                 extrapolate_auxiliary_ratios=True,
                  block_size=None,
                  name="gaussian_encoder",
                  **kwargs):

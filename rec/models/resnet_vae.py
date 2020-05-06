@@ -444,7 +444,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  deterministic_filters=160,
                  stochastic_filters=32,
                  use_iaf=False,
-                 kl_per_partition=None,
+                 kl_per_partition=8.,
                  latent_size="variable",
                  ema_decay=0.999,
                  name="resnet_vae",
