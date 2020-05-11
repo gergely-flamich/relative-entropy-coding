@@ -851,7 +851,7 @@ class BidirectionalResNetVAE(tfk.Model):
         # We sequentially decode through the resnet blocks
         for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
             tensor = resnet_block(tensor, inference_pass=False, decoder_args={"seed": seed,
-                                                                              "indices": compressed_codes})
+                                                                              "indices": compressed_code})
 
         reconstruction = tf.nn.elu(tensor)
         reconstruction = self.last_gen_conv(reconstruction)
