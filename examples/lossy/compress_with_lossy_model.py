@@ -14,7 +14,7 @@ from rec.coding.samplers import RejectionSampler, ImportanceSampler
 from datasets import data_ingredient, load_dataset, write_png
 
 tfd = tfp.distributions
-tf.config.experimental.set_visible_devices([], 'GPU')
+#tf.config.experimental.set_visible_devices([], 'GPU')
 
 ex = Experiment("compress_with_loss_model", ingredients=[data_ingredient])
 
@@ -101,7 +101,6 @@ def compress(dataset,
              num_test_images,
 
              _log):
-
     if len(model_dir) == 0:
         raise ValueError("Model directory must be specified!")
 
@@ -166,11 +165,8 @@ def compress(dataset,
         outfile.write(', '.join(['name',
                                  'KL',
                                  'lossy_BPP',
-                                 'comp_residual',
                                  'comp_codelength',
-                                 'comp_lossless_BPP',
                                  'comp_lossy_BPP',
-                                 'comp_BPD',
                                  'comp_time',
                                  'ideal_PSNR',
                                  'ideal_MS_SSIM',
@@ -223,12 +219,12 @@ def compress(dataset,
         try:
             compressed_file_path = f"{model_dir}/{reconstruction_dir_name}/{image_name}.rec"
 
-            block_indices, reconstruction = model.compress(file_path=compressed_file_path,
-                                                           image=image,
-                                                           seed=compression_seed,
-                                                           sampler=coder,
-                                                           block_size=block_size,
-                                                           max_index=20)
+            reconstruction = model.compress(file_path=compressed_file_path,
+                                            image=image,
+                                            seed=compression_seed,
+                                            sampler=coder,
+                                            block_size=block_size,
+                                            max_index=20)
 
             compressed_file_bits = os.path.getsize(compressed_file_path) * 8
 
@@ -238,19 +234,13 @@ def compress(dataset,
         except Exception:
             _log.info("Coding Error occurred.")
             raise
-            continue
 
         comp_time = time.time() - start_time
-        comp_codelength = compressed_file_bits
-        comp_residual = -model.log_likelihood / np.log(2)
-        comp_lossy_bpp = comp_codelength / num_pixels
-        comp_lossless_bpp = comp_residual / num_pixels + comp_lossy_bpp
-        comp_bpd = comp_lossless_bpp / dataset["num_channels"]
-
+        comp_lossy_bpp = compressed_file_bits / num_pixels
         reconstruction = tf.clip_by_value(reconstruction, 0., 1.)
 
         psnr = tf.squeeze(tf.image.psnr(reconstruction * 255.,
-                                        image=255.,
+                                        image * 255.,
                                         max_val=255.))
 
         ms_ssim = tf.squeeze(tf.image.ssim_multiscale(reconstruction * 255.,
@@ -265,17 +255,14 @@ def compress(dataset,
                   f"PSNR: {psnr:.4f}, "
                   f"MS-SSIM: {ms_ssim:.4f},"
                   f"comp_time: {comp_time}")
-        _log.info("Codelength: {}, residuals: {}".format(comp_codelength, comp_residual))
+        _log.info(f"Codelength: {compressed_file_bits}")
 
         with open(output_filename, "a") as outfile:
             outfile.write(', '.join([image_name] +
                                     [str(float(v)) for v in [kld,
                                                              lossy_bpp,
-                                                             comp_residual,
-                                                             comp_codelength,
-                                                             comp_lossless_bpp,
+                                                             compressed_file_bits,
                                                              comp_lossy_bpp,
-                                                             comp_bpd,
                                                              comp_time,
                                                              ideal_psnr,
                                                              ideal_ms_ssim,
