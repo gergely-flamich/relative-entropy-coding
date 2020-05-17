@@ -26,6 +26,7 @@ class SignalConv2D(tfl.Layer):
                  extra_pad_end=True,
                  use_bias=True,
                  dft_kernel_parametrization=True,
+                 activation=None,
                  name="signal_conv2d",
                  **kwargs):
         #                  kernel_initializer=tf.initializers.variance_scaling(),
@@ -44,6 +45,7 @@ class SignalConv2D(tfl.Layer):
         self.use_bias = bool(use_bias)
         self.padding = str(padding).lower()
         self.dft_kernel_parametrization = bool(dft_kernel_parametrization)
+        self.activation = activation
 
         self.pad_mode = {
             "zeros": "CONSTANT",
@@ -236,6 +238,9 @@ class SignalConv2D(tfl.Layer):
         # ---------------------------------------------------------------------
         if self.use_bias:
             outputs = tf.nn.bias_add(outputs, self.bias)
+
+        if self.activation is not None:
+            outputs = self.activation(outputs)
 
         return outputs
 

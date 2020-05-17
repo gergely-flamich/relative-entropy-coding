@@ -6,7 +6,8 @@ import tensorflow as tf
 
 import tensorflow_probability as tfp
 
-from rec.models.lossy import Large1LevelVAE, Large2LevelVAE
+from rec.models.lossy import Large1LevelVAE, Large2LevelVAE, Large4LevelVAE
+from rec.core.utils import gaussian_blur
 
 from datasets import data_ingredient, quantize_image
 
@@ -25,8 +26,8 @@ def config(dataset):
     model = "large_level_1_vae"
 
     beta = 1.
-    anneal_beta = False
-    anneal_end = 100000
+    anneal_kl = False
+    anneal_end = 60000
 
     optimizer = "adam"
     learning_rate = 1e-4
@@ -60,12 +61,25 @@ def config(dataset):
         }
 
         model_save_dir = f"{model_save_base_dir}/{dataset['dataset_name']}/{model}/{loss_fn}/" \
-                         f"beta_{beta:.3f}"
-
-        pass
+                         f"beta_{beta:.3f}_filters_{level_1_filters}_{level_2_filters}"
 
     elif model == "large_level_4_vae":
-        pass
+        level_1_filters = 196
+        level_2_filters = 196
+        level_3_filters = 128
+        level_4_filters = 128
+
+        loss_fn = "mse"
+
+        model_config = {
+            "level_1_filters": level_1_filters,
+            "level_2_filters": level_2_filters,
+            "level_3_filters": level_3_filters,
+            "level_4_filters": level_4_filters,
+        }
+
+        model_save_dir = f"{model_save_base_dir}/{dataset['dataset_name']}/{model}/{loss_fn}/" \
+                         f"beta_{beta:.3f}_filters_{level_1_filters}_{level_2_filters}_{level_3_filters}_{level_4_filters}"
 
     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     log_dir = f"{model_save_dir}/logs/{current_time}/train"
@@ -99,7 +113,7 @@ def train(summary_writer,
           optimizer,
 
           beta,
-          anneal_beta,
+          anneal_kl,
           anneal_end,
 
           log_freq):
@@ -122,6 +136,10 @@ def train(summary_writer,
             # Correction for the rescaling
             mse = mse * 255. ** 2.
 
+            mae = tf.reduce_mean(tf.math.abs(batch - reconstruction))
+            # Correction for the rescaling
+            mae = mae * 255.
+
             ms_ssim = tf.reduce_mean(1. - tf.image.ssim_multiscale(batch,
                                                                    reconstruction,
                                                                    max_val=1.,
@@ -135,6 +153,16 @@ def train(summary_writer,
             elif loss_fn == "ms-ssim":
                 distortion = ms_ssim
 
+            elif loss_fn == "mae":
+                distortion = mae
+
+            elif loss_fn == "mae-ms-ssim":
+                alpha = 0.84
+
+                blurred_mae = gaussian_blur(mae, kernel_size=11, sigma=8.)
+
+                distortion = alpha * ms_ssim + (1 - alpha) * blurred_mae
+
             else:
                 raise NotImplementedError
 
@@ -145,14 +173,14 @@ def train(summary_writer,
             # Divide by the number of pixels and switch from nats to bits
             bpp = kld / (batch.shape[1] * batch.shape[2] * log_2)
 
-            if anneal_beta:
+            if anneal_kl:
                 # Starts beta at a high value, and anneals it linearly to the desired value
-                current_beta = beta * tf.maximum(1., 1. + 99. * (1. - tf.cast(ckpt.step, tf.float32) / anneal_end))
+                kl_coeff = tf.minimum(1., tf.cast(ckpt.step, tf.float32) / anneal_end)
 
             else:
-                current_beta = beta
+                kl_coeff = 1.
 
-            loss = current_beta * distortion + bpp
+            loss = beta * distortion + kl_coeff * bpp
 
         stop = False
         for var in model.trainable_variables:
@@ -165,6 +193,7 @@ def train(summary_writer,
             break
 
         gradients = tape.gradient(loss, model.trainable_variables)
+        #gradients = tf.clip_by_global_norm(gradients, clip_norm=20.)
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
         if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
@@ -192,13 +221,15 @@ def train(summary_writer,
 
             with summary_writer.as_default():
 
-                tfs.scalar(name="Beta", data=current_beta, step=ckpt.step)
+                tfs.scalar(name="KL_Coeff", data=kl_coeff, step=ckpt.step)
                 tfs.scalar(name="Loss", data=loss, step=ckpt.step)
                 tfs.scalar(name="MSE", data=mse, step=ckpt.step)
+                tfs.scalar(name="MAE", data=mae, step=ckpt.step)
                 tfs.scalar(name="MS-SSIM_(distortion)", data=ms_ssim, step=ckpt.step)
                 tfs.scalar(name="MS-SSIM", data=ms_ssim_actual, step=ckpt.step)
                 tfs.scalar(name="MS-SSIM_(dB)", data=ms_ssim_actual_db, step=ckpt.step)
                 tfs.scalar(name="PSNR", data=psnr, step=ckpt.step)
+                tfs.scalar(name="Distortion", data=distortion, step=ckpt.step)
                 tfs.scalar(name="Total_KL", data=kld, step=ckpt.step)
                 tfs.scalar(name="BPP",
                            data=bpp,
@@ -228,7 +259,7 @@ def run(dataset,
         learning_rate,
 
         beta,
-        anneal_beta,
+        anneal_kl,
         anneal_end,
 
         model_save_dir,
@@ -260,6 +291,7 @@ def run(dataset,
     model = {
         "large_level_1_vae": Large1LevelVAE,
         "large_level_2_vae": Large2LevelVAE,
+        "large_level_4_vae": Large4LevelVAE
     }[model](**model_config)
 
     # Initialize model
@@ -317,7 +349,7 @@ def run(dataset,
           optimizer=optimizer,
 
           beta=beta,
-          anneal_beta=anneal_beta,
+          anneal_kl=anneal_kl,
           anneal_end=anneal_end,
 
           log_freq=log_freq)

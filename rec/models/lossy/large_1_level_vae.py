@@ -157,7 +157,7 @@ class Large1LevelVAE(LossyCompressionModel):
     def kl_divergence(self):
         return [tf.reduce_mean(tf.reduce_sum(tfd.kl_divergence(self.posterior, self.prior), axis=[1, 2, 3]))]
 
-    def call(self, tensor):
+    def call(self, tensor, sampling_fn=None):
 
         inputs = tensor
         batch_size, height, width, _ = inputs.shape
@@ -186,11 +186,59 @@ class Large1LevelVAE(LossyCompressionModel):
                                 scale=prior_scale)
 
         # Generate latent code from the posterior: z ~ q(z | x)
-        tensor = self.posterior.sample()
+        if sampling_fn is None:
+            tensor = self.posterior.sample()
+
+        else:
+            indices, tensor = sampling_fn(target=self.posterior,
+                                          coder=self.prior)
 
         # Reconstruct image
         tensor = self.synthesis_transform(tensor)
 
+        if sampling_fn is None:
+            return tensor
+
+        else:
+            return [indices], tensor
+
+    def compress(self, file_path, image, seed, sampler, block_size, max_index):
+
+        sampling_fn = lambda target, coder: sampler.encode(target, coder, seed=seed)
+
+        block_indices, reconstruction = self(image[None, ...], sampling_fn=sampling_fn)
+
+        write_compressed_code(file_path=file_path,
+                              seed=seed,
+                              image_shape=image.shape,
+                              block_size=block_size,
+                              block_indices=block_indices,
+                              max_index=max_index)
+
+        return reconstruction
+
+    def decompress(self, file_path, sampler):
+
+        # Recover stuff from the binary representation
+        seed, image_shape, block_size, block_indices = read_compressed_code(file_path=file_path)
+        batch_size, height, width = image_shape
+
+        # Recover image
+
+        # Calculate the prior
+        tensor = self.prior_base(batch_size, height, width)
+        tensor = self._prior_conv(tensor)
+        tensor = tf.nn.elu(tensor)
+
+        prior_loc = self._prior_loc_head(tensor)
+        prior_scale = tf.nn.softplus(self._prior_log_scale_head(tensor))
+
+        self.prior = tfd.Normal(loc=prior_loc,
+                                scale=prior_scale)
+
+        # Decode sample
+        tensor = sampler.decode(self.prior, seed=seed, indices=block_indices[0])
+
+        tensor = self.synthesis_transform(tensor)
+
         return tensor
-
-
