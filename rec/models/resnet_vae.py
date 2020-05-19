@@ -291,7 +291,6 @@ class BidirectionalResidualBlock(tfl.Layer):
         # Inference pass
         # ---------------------------------------------------------------------
         if inference_pass:
-
             # Calculate first part of posterior statistics
             self.infer_posterior_loc = self.infer_posterior_loc_head(tensor)
             self.infer_posterior_log_scale = self.infer_posterior_log_scale_head(tensor)
@@ -385,7 +384,7 @@ class BidirectionalResidualBlock(tfl.Layer):
             tensor = self.gen_conv1(tensor)
 
             # Concatenate code and generative features. The channels are always the last axis
-            tensor = tf.concat([tensor, latent_code], axis=-1)
+            tensor = tf.concat([latent_code, tensor], axis=-1)
 
             tensor = tf.nn.elu(tensor)
 

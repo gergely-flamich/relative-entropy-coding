@@ -15,6 +15,7 @@ from rec.models.large_resnet_vae_new import LargeResNetVAE
 from datasets import data_ingredient, load_dataset, write_png
 from rec.coding.utils import CodingError
 from rec.io.entropy_coding import ArithmeticCoder
+from examples.load_hilloc_weights import load_weights
 
 tf.config.experimental.set_visible_devices([], 'GPU')
 
@@ -272,6 +273,8 @@ def resnet_vae_compress(model,
         model_dir = os.path.join(model_save_dir, "compressor_initialized_{}".format(kl_per_partition))
         model.load_weights(f"{model_dir}/compressor_initialized").expect_partial()
 
+    _log.info("Loading HILLOC weights.")
+    load_weights(model, np.load('rvae_weights_24layer.npy', allow_pickle=True).item())
     os.makedirs(f"{model_dir}/{reconstruction_dir_name}", exist_ok=True)
     # -------------------------------------------------------------------------
     # Compress images

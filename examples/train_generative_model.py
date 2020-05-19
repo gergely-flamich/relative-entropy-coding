@@ -4,12 +4,14 @@ from sacred.stflow import LogFileWriter
 import json
 import datetime
 
+import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
 from rec.models.mnist_vae import MNISTVAE
 from rec.models.resnet_vae import BidirectionalResNetVAE
 from rec.models.large_resnet_vae_new import LargeResNetVAE
+from examples.load_hilloc_weights import load_weights
 
 from datasets import data_ingredient, load_dataset
 
@@ -64,7 +66,7 @@ def default_config(dataset_info):
     elif model == "resnet_vae":
 
         use_iaf = False
-        num_res_blocks = 4
+        num_res_blocks = 24
         likelihood_function = "discretized_logistic"
         learn_likelihood_scale = True
 
@@ -284,7 +286,6 @@ def train_vae(dataset,
 @ex.capture
 def train_resnet_vae(dataset,
                      model,
-
                      dataset_info,
                      model_save_dir,
                      log_dir,
@@ -361,16 +362,16 @@ def train_resnet_vae(dataset,
     # Training Loop
     # -------------------------------------------------------------------------
 
-    @tf.function
+    # @tf.function
     def train_step(batch, model, beta):
-        print("Retracing train step!")
+        # print("Retracing train step!")
 
         with tf.GradientTape() as tape:
 
             reconstruction = model(batch, training=True)
 
             log_likelihood = model.log_likelihood
-            kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
+            kld = model.kl_divergence(empirical=False, minimum_kl=lamb)
 
             bpp = kld / (num_pixels * log_2)
             if lossy and int(ckpt.step) > adjust_beta_after_iters:
@@ -394,7 +395,7 @@ def train_resnet_vae(dataset,
         # Once the model parameters are updated, we also update their exponential moving average.
         model.update_ema_variables()
 
-        true_kls = model.kl_divergence(empirical=True, minimum_kl=0., reduce=False)
+        true_kls = model.kl_divergence(empirical=False, minimum_kl=-1000000., reduce=False)
 
         return loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls
 
@@ -405,6 +406,10 @@ def train_resnet_vae(dataset,
         _log.info(f"Restored model from {manager.latest_checkpoint}")
     else:
         _log.info("Initializing model from scratch.")
+
+    print('loading weights')
+    load_weights(model, np.load('rvae_weights_24layer.npy', allow_pickle=True).item())
+    print('done')
 
     for batch in dataset.take(iters - int(ckpt.step)):
 

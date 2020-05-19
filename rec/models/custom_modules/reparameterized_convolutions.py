@@ -119,6 +119,8 @@ class ReparameterizedConv(tf.keras.layers.Layer):
         if not initializing:
             v = v * tf.exp(self.kernel_log_scale)
 
+        # print(v[0, 0, 0, 0])
+        # print(v.shape)
         return v
 
     def _get_mask(self, axes_hwio):
@@ -447,7 +449,7 @@ class ReparameterizedConv2DTranspose(ReparameterizedConv2D):
 
     @property
     def kernel(self):
-        return self._get_kernel([0, 1, 3])
+        return self._get_kernel([0, 1, 2])
 
     @property
     def mask(self):
