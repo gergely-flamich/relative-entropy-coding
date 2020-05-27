@@ -110,6 +110,7 @@ def train(summary_writer,
           iters,
 
           loss_fn,
+          likelihood_log_scale,
           optimizer,
 
           beta,
@@ -118,7 +119,10 @@ def train(summary_writer,
 
           log_freq):
 
+    discretized_logistic = "discretized_logistic"
+
     print("Tracing!")
+    print(likelihood_log_scale.trainable)
 
     for batch in dataset.take(tf.cast(iters - int(ckpt.step), tf.int64)):
         batch.set_shape([batch_size] + batch.shape[1:])
@@ -127,6 +131,8 @@ def train(summary_writer,
         ckpt.step.assign_add(1)
 
         with tf.GradientTape() as tape:
+
+            likelihood_scale = tf.math.exp(likelihood_log_scale)
 
             reconstruction = model(batch)
 
@@ -163,6 +169,30 @@ def train(summary_writer,
 
                 distortion = alpha * ms_ssim + (1 - alpha) * blurred_mae
 
+            elif loss_fn == discretized_logistic:
+                binsize = 1. / 256.
+
+                clipped_reconstruction = tf.clip_by_value(reconstruction - 0.5,
+                                                          -0.5 + 1. / 512.,
+                                                          0.5 - 1. / 512.)
+                centered_batch = batch - 0.5
+
+                # Discretize the output
+                discretized_input = tf.math.floor(centered_batch / binsize) * binsize
+                # print("cr range", tf.reduce_min(clipped_reconstruction), tf.reduce_max(clipped_reconstruction))
+                # print("cb range", tf.reduce_min(centered_batch), tf.reduce_max(centered_batch))
+                # print("max diff", tf.reduce_max(tf.abs((discretized_input - clipped_reconstruction))))
+
+                discretized_input = (discretized_input - clipped_reconstruction) / likelihood_scale
+
+                log_likelihood = tf.nn.sigmoid(discretized_input + binsize / likelihood_scale)
+                log_likelihood = log_likelihood - tf.nn.sigmoid(discretized_input)
+
+                log_likelihood = tf.math.log(log_likelihood + 1e-7)
+
+                # distortion is average distortion per image!
+                distortion = -tf.reduce_mean(tf.reduce_sum(log_likelihood, axis=3)) / log_2
+
             else:
                 raise NotImplementedError
 
@@ -182,6 +212,12 @@ def train(summary_writer,
 
             loss = beta * distortion + kl_coeff * bpp
 
+            # print(loss)
+            # print(distortion)
+            # print(kld)
+            # print(likelihood_scale)
+            # print()
+
         stop = False
         for var in model.trainable_variables:
             if tf.reduce_any(tf.math.is_nan(var)) or tf.reduce_any(tf.math.is_inf(var)):
@@ -192,9 +228,9 @@ def train(summary_writer,
             tf.print("stopping")
             break
 
-        gradients = tape.gradient(loss, model.trainable_variables)
+        gradients = tape.gradient(loss, model.trainable_variables + [likelihood_log_scale])
         #gradients = tf.clip_by_global_norm(gradients, clip_norm=20.)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables + [likelihood_log_scale]))
 
         if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
             tf.print("Loss blew up:", loss, "Distortion:", distortion, "KL:", kld, "Quitting.")
@@ -223,6 +259,7 @@ def train(summary_writer,
 
                 tfs.scalar(name="KL_Coeff", data=kl_coeff, step=ckpt.step)
                 tfs.scalar(name="Loss", data=loss, step=ckpt.step)
+                tfs.scalar(name="Likelihood_scale", data=likelihood_scale, step=ckpt.step)
                 tfs.scalar(name="MSE", data=mse, step=ckpt.step)
                 tfs.scalar(name="MAE", data=mae, step=ckpt.step)
                 tfs.scalar(name="MS-SSIM_(distortion)", data=ms_ssim, step=ckpt.step)
@@ -306,6 +343,10 @@ def run(dataset,
         "adamax": tf.optimizers.Adamax
     }[optimizer](learn_rate)
 
+    likelihood_log_scale = tf.Variable(0.,
+                                   name="likelihood_log_scale",
+                                   trainable=loss_fn == "discretized_logistic")
+
     # -------------------------------------------------------------------------
     # Create Checkpoints
     # -------------------------------------------------------------------------
@@ -314,6 +355,7 @@ def run(dataset,
     ckpt = tf.train.Checkpoint(step=optim_step,
                                model=model,
                                #learn_rate=learn_rate,
+                               likelihood_log_scale=likelihood_log_scale,
                                optimizer=optimizer,
                                beta=beta)
 
@@ -346,6 +388,7 @@ def run(dataset,
           iters=iters,
 
           loss_fn=loss_fn,
+          likelihood_log_scale=likelihood_log_scale,
           optimizer=optimizer,
 
           beta=beta,
