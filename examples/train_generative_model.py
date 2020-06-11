@@ -379,9 +379,9 @@ def train_resnet_vae(dataset,
     # -------------------------------------------------------------------------
 
     @tf.function
-    def train_step(batch, model, beta, optimizer, bpp_buffer):
+    def train_step(batch, model, beta):
+        print("Retracing train step!")
 
-        print("Retracing train step with adjustment!")
         with tf.GradientTape() as tape:
 
             reconstruction = model(batch, training=True)
@@ -391,23 +391,12 @@ def train_resnet_vae(dataset,
 
             bpp = kld / (num_pixels * log_2)
 
-            # Add bpp to bpp buffer
-            bpp_buffer = tf.concat([[bpp], bpp_buffer[:-1]], axis=0)
+            if lossy and int(ckpt.step) > adjust_beta_after_iters:
+                if bpp > target_bpp + 1e-2:
+                    beta.assign(beta * 1.001)
 
-            average_bpp = tf.reduce_mean(bpp_buffer)
-
-            if (lossy and
-                    (adjust_beta_after_iters is not None and
-                     int(ckpt.step) > adjust_beta_after_iters)
-                    and
-                    (stop_adjust_after_iters is None or
-                        int(ckpt.step) < adjust_beta_after_iters + stop_adjust_after_iters)):
-
-                if average_bpp > target_bpp + 3e-2:
-                    beta.assign(beta / 1.0003)
-
-                elif average_bpp < target_bpp - 3e-2:
-                    beta.assign(beta * 1.0003)
+                elif bpp < target_bpp - 1e-2:
+                    beta.assign(beta / 1.001)
 
             # Linearly annealed beta
             if anneal:
@@ -415,8 +404,7 @@ def train_resnet_vae(dataset,
             else:
                 current_beta = beta
 
-            negative_per_pixel_likelihood = -log_likelihood / (num_pixels * 3)
-            loss = current_beta * negative_per_pixel_likelihood + bpp
+            loss = -log_likelihood + current_beta * kld
 
         gradients = tape.gradient(loss, model.trainable_variables)
         optimizer.apply_gradients(zip(gradients, model.trainable_variables))
@@ -426,7 +414,7 @@ def train_resnet_vae(dataset,
 
         true_kls = model.kl_divergence(empirical=True, minimum_kl=0., reduce=False)
 
-        return loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls, bpp_buffer
+        return loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls
 
     # Restore previous session
     ckpt.restore(manager.latest_checkpoint)
@@ -460,16 +448,15 @@ def train_resnet_vae(dataset,
         if int(ckpt.step) == 4 * drop_learning_rate_after_iter:
             learn_rate.assign(learn_rate * learning_rate_drop_rate)
 
-        loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls, bpp_buffer = train_step(batch,
-                                                                                                        model,
-                                                                                                        beta,
-                                                                                                        optimizer,
-                                                                                                        bpp_buffer)
+        loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls = train_step(batch, model, beta)
 
         true_kl = tf.reduce_sum(true_kls)
 
         if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
             raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
+
+        # Once the model parameters are updated, we also update their exponential moving average.
+        model.update_ema_variables()
 
         if int(ckpt.step) % tensorboard_log_freq == 1:
             # Save model
