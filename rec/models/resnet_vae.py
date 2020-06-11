@@ -5,7 +5,8 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D
+from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, AutoRegressiveMultiConv2D, \
+    SignalConv2D
 from rec.coding import GaussianCoder, BeamSearchCoder
 from rec.coding.samplers import RejectionSampler, ImportanceSampler
 
@@ -39,6 +40,7 @@ class BidirectionalResidualBlock(tfl.Layer):
                  use_iaf: bool = False,
                  is_last: bool = False,
                  kl_per_partition=8.,
+                 use_sig_convs=False,
                  name: str = "bidirectional_resnet_block",
                  **kwargs):
         super().__init__(name=name,
@@ -63,6 +65,8 @@ class BidirectionalResidualBlock(tfl.Layer):
 
         # Use inverse autoregressive flows as the posterior?
         self.use_iaf = use_iaf
+
+        self.use_sig_convs = use_sig_convs
 
         # ---------------------------------------------------------------------
         # Declare layers
@@ -192,25 +196,61 @@ class BidirectionalResidualBlock(tfl.Layer):
         # ---------------------------------------------------------------------
 
         if not self.is_last:
-            self.infer_conv1 = ReparameterizedConv2D(filters=self.deterministic_filters,
-                                                     kernel_size=self.kernel_size,
-                                                     strides=(1, 1),
-                                                     padding="same")
+            self.infer_conv1 = (SignalConv2D(filters=self.deterministic_filters,
+                                             kernel=self.kernel_size,
+                                             strides_down=1,
+                                             corr=True,
+                                             padding="reflect",
+                                             use_bias=True,
+                                             name="infer_conv_0")
+                                if self.use_sig_convs else
+                                ReparameterizedConv2D(filters=self.deterministic_filters,
+                                                      kernel_size=self.kernel_size,
+                                                      strides=(1, 1),
+                                                      padding="same",
+                                                      name="infer_conv_0"))
 
-            self.infer_conv2 = ReparameterizedConv2D(filters=self.deterministic_filters,
-                                                     kernel_size=self.kernel_size,
-                                                     strides=(1, 1),
-                                                     padding="same")
+            self.infer_conv2 = (SignalConv2D(filters=self.deterministic_filters,
+                                             kernel=self.kernel_size,
+                                             strides_down=1,
+                                             corr=True,
+                                             padding="reflect",
+                                             use_bias=True,
+                                             name="infer_conv_1")
+                                if self.use_sig_convs else
+                                ReparameterizedConv2D(filters=self.deterministic_filters,
+                                                      kernel_size=self.kernel_size,
+                                                      strides=(1, 1),
+                                                      padding="same",
+                                                      name="infer_conv_1"))
 
-        self.infer_posterior_loc_head = ReparameterizedConv2D(filters=self.stochastic_filters,
-                                                              kernel_size=self.kernel_size,
-                                                              strides=(1, 1),
-                                                              padding="same")
+        self.infer_posterior_loc_head = (SignalConv2D(filters=self.stochastic_filters,
+                                                      kernel=self.kernel_size,
+                                                      strides_down=1,
+                                                      corr=True,
+                                                      padding="reflect",
+                                                      use_bias=not self.is_last,
+                                                      name="infer_posterior_loc_head")
+                                         if self.use_sig_convs else
+                                         ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                               kernel_size=self.kernel_size,
+                                                               strides=(1, 1),
+                                                               padding="same",
+                                                               name="infer_posterior_loc_head"))
 
-        self.infer_posterior_log_scale_head = ReparameterizedConv2D(filters=self.stochastic_filters,
-                                                                    kernel_size=self.kernel_size,
-                                                                    strides=(1, 1),
-                                                                    padding="same")
+        self.infer_posterior_log_scale_head = (SignalConv2D(filters=self.stochastic_filters,
+                                                            kernel=self.kernel_size,
+                                                            strides_down=1,
+                                                            corr=True,
+                                                            padding="reflect",
+                                                            use_bias=not self.is_last,
+                                                            name="infer_posterior_log_scale_head")
+                                               if self.use_sig_convs else
+                                               ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                                     kernel_size=self.kernel_size,
+                                                                     strides=(1, 1),
+                                                                     padding="same",
+                                                                     name="infer_posterior_log_scale_head"))
 
         # ---------------------------------------------------------------------
         # Stuff for the generative side
@@ -218,35 +258,89 @@ class BidirectionalResidualBlock(tfl.Layer):
         # in the original implementation the dimensions within a single block do not
         # decrease, hence there is not much point in using the more expensive operation
         # ---------------------------------------------------------------------
-        self.gen_conv1 = ReparameterizedConv2D(filters=self.deterministic_filters,
-                                               kernel_size=self.kernel_size,
-                                               strides=(1, 1),
-                                               padding="same")
+        self.gen_conv1 = (SignalConv2D(filters=self.deterministic_filters,
+                                       kernel=self.kernel_size,
+                                       strides_up=1,
+                                       corr=False,
+                                       padding="reflect",
+                                       use_bias=True,
+                                       name="gen_conv_0")
+                          if self.use_sig_convs else
+                          ReparameterizedConv2D(filters=self.deterministic_filters,
+                                                kernel_size=self.kernel_size,
+                                                strides=(1, 1),
+                                                padding="same",
+                                                name="gen_conv_0"))
 
-        self.gen_conv2 = ReparameterizedConv2D(filters=self.deterministic_filters,
-                                               kernel_size=self.kernel_size,
-                                               strides=(1, 1),
-                                               padding="same")
+        self.gen_conv2 = (SignalConv2D(filters=self.deterministic_filters,
+                                       kernel=self.kernel_size,
+                                       strides_up=1,
+                                       corr=False,
+                                       padding="reflect",
+                                       use_bias=True,
+                                       name="gen_conv_1")
+                          if self.use_sig_convs else
+                          ReparameterizedConv2D(filters=self.deterministic_filters,
+                                                kernel_size=self.kernel_size,
+                                                strides=(1, 1),
+                                                padding="same",
+                                                name="gen_conv_1"))
 
-        self.prior_loc_head = ReparameterizedConv2D(filters=self.stochastic_filters,
-                                                    kernel_size=self.kernel_size,
-                                                    strides=(1, 1),
-                                                    padding="same")
+        self.prior_loc_head = (SignalConv2D(filters=self.stochastic_filters,
+                                            kernel=self.kernel_size,
+                                            strides_up=1,
+                                            corr=False,
+                                            padding="reflect",
+                                            use_bias=True,
+                                            name="prior_loc_head")
+                               if self.use_sig_convs else
+                               ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                     kernel_size=self.kernel_size,
+                                                     strides=(1, 1),
+                                                     padding="same",
+                                                     name="prior_loc_head"))
 
-        self.prior_log_scale_head = ReparameterizedConv2D(filters=self.stochastic_filters,
-                                                          kernel_size=self.kernel_size,
-                                                          strides=(1, 1),
-                                                          padding="same")
+        self.prior_log_scale_head = (SignalConv2D(filters=self.stochastic_filters,
+                                                  kernel=self.kernel_size,
+                                                  strides_up=1,
+                                                  corr=False,
+                                                  padding="reflect",
+                                                  use_bias=True,
+                                                  name="prior_log_scale_head")
+                                     if self.use_sig_convs else
+                                     ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                           kernel_size=self.kernel_size,
+                                                           strides=(1, 1),
+                                                           padding="same",
+                                                           name="prior_log_scale_head"))
 
-        self.gen_posterior_loc_head = ReparameterizedConv2D(filters=self.stochastic_filters,
-                                                            kernel_size=self.kernel_size,
-                                                            strides=(1, 1),
-                                                            padding="same")
+        self.gen_posterior_loc_head = (SignalConv2D(filters=self.stochastic_filters,
+                                                    kernel=self.kernel_size,
+                                                    strides_up=1,
+                                                    corr=False,
+                                                    padding="reflect",
+                                                    use_bias=True,
+                                                    name="gen_posterior_loc_head")
+                                       if self.use_sig_convs else
+                                       ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                             kernel_size=self.kernel_size,
+                                                             strides=(1, 1),
+                                                             padding="same",
+                                                             name="gen_posterior_loc_head"))
 
-        self.gen_posterior_log_scale_head = ReparameterizedConv2D(filters=self.stochastic_filters,
-                                                                  kernel_size=self.kernel_size,
-                                                                  strides=(1, 1),
-                                                                  padding="same")
+        self.gen_posterior_log_scale_head = (SignalConv2D(filters=self.stochastic_filters,
+                                                          kernel=self.kernel_size,
+                                                          strides_up=1,
+                                                          corr=False,
+                                                          padding="reflect",
+                                                          use_bias=True,
+                                                          name="gen_posterior_log_scale_head")
+                                             if self.use_sig_convs else
+                                             ReparameterizedConv2D(filters=self.stochastic_filters,
+                                                                   kernel_size=self.kernel_size,
+                                                                   strides=(1, 1),
+                                                                   padding="same",
+                                                                   name="gen_posterior_log_scale_head"))
 
         # ---------------------------------------------------------------------
         # If we use IAF posteriors, we need some additional layers
@@ -328,8 +422,8 @@ class BidirectionalResidualBlock(tfl.Layer):
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
 
                 # Sample from posterior. The loc and scale are automagically calculated using property methods
-                self.posterior = self.distribution(loc=self.posterior_loc,
-                                                   scale=self.posterior_scale)
+                self.posterior = tfd.Normal(loc=self.posterior_loc,
+                                            scale=self.posterior_scale)
 
                 if self._initialized:
                     latent_code = self.posterior.sample()
@@ -371,8 +465,8 @@ class BidirectionalResidualBlock(tfl.Layer):
                 self.gen_posterior_log_scale = self.gen_posterior_log_scale_head(tensor)
 
                 # The loc and scale are automagically calculated using property methods
-                self.posterior = self.distribution(loc=self.posterior_loc,
-                                                   scale=self.posterior_scale)
+                self.posterior = tfd.Normal(loc=self.posterior_loc,
+                                            scale=self.posterior_scale)
                 indices, latent_code = self.coder.encode(self.posterior, self.prior, **encoder_args)
 
             # -----------------------------------------------------------------
@@ -444,7 +538,7 @@ class BidirectionalResNetVAE(tfk.Model):
                  deterministic_filters=160,
                  stochastic_filters=32,
                  use_iaf=False,
-                 kl_per_partition=None,
+                 kl_per_partition=8.,
                  latent_size="variable",
                  ema_decay=0.999,
                  name="resnet_vae",
@@ -757,7 +851,7 @@ class BidirectionalResNetVAE(tfk.Model):
         # We sequentially decode through the resnet blocks
         for resnet_block, compressed_code in zip(self.residual_blocks, compressed_codes):
             tensor = resnet_block(tensor, inference_pass=False, decoder_args={"seed": seed,
-                                                                              "indices": compressed_codes})
+                                                                              "indices": compressed_code})
 
         reconstruction = tf.nn.elu(tensor)
         reconstruction = self.last_gen_conv(reconstruction)

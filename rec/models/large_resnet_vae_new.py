@@ -3,10 +3,8 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, GDN
-
-from rec.coding import GaussianCoder, BeamSearchCoder
-from rec.coding.samplers import RejectionSampler, ImportanceSampler
+from rec.models.custom_modules import ReparameterizedConv2D, ReparameterizedConv2DTranspose, GDN, SignalConv2D
+from rec.core.utils import gaussian_blur
 
 from .resnet_vae import ModelError, BidirectionalResidualBlock
 
@@ -25,14 +23,17 @@ class LargeResNetVAE(tfk.Model):
     AVAILABLE_LIKELIHOODS = [
         "discretized_logistic",
         "gaussian",
-        "laplace"
+        "laplace",
+        "ms-ssim",
+        "ms-ssim-laplace",
     ]
 
     def __init__(self,
                  sampler,
                  sampler_args={},
                  coder_args={},
-                 use_gdn = True,
+                 use_gdn=True,
+                 use_sig_convs=True,
                  distribution="gaussian",
                  likelihood_function="laplace",
                  learn_likelihood_scale=False,
@@ -95,97 +96,214 @@ class LargeResNetVAE(tfk.Model):
         # Note: we don't apply an ELU at the end of the block, this will happen
         # in the residual block
         self.first_infer_block = [
-            ReparameterizedConv2D(kernel_size=self.first_kernel_size,
-                                  strides=self.first_strides,
-                                  filters=self.first_deterministic_filters,
-                                  padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          corr=True,
+                          strides_down=2,
+                          filters=self.first_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="infer_sig_conv_0_0")
+             if use_sig_convs else
+             ReparameterizedConv2D(kernel_size=(5, 5),
+                                   strides=2,
+                                   filters=self.first_deterministic_filters,
+                                   padding="same")
+             ),
 
             (GDN(inverse=False, name="inf_gdn_0") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
-                                  filters=self.first_deterministic_filters,
-                                  padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          corr=True,
+                          strides_down=2,
+                          filters=self.first_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="infer_sig_conv_0_1")
+             if use_sig_convs else
+             ReparameterizedConv2D(kernel_size=(5, 5),
+                                   strides=2,
+                                   filters=self.first_deterministic_filters,
+                                   padding="same")
+             ),
 
             (GDN(inverse=False, name="inf_gdn_1") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
-                                  filters=self.first_deterministic_filters,
-                                  padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          corr=True,
+                          strides_down=2,
+                          filters=self.first_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="infer_sig_conv_0_2")
+             if use_sig_convs else
+             ReparameterizedConv2D(kernel_size=(5, 5),
+                                   strides=2,
+                                   filters=self.first_deterministic_filters,
+                                   padding="same")
+             ),
 
             (GDN(inverse=False, name="inf_gdn_2") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
-                                  filters=self.first_deterministic_filters,
-                                  padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          corr=True,
+                          strides_down=2,
+                          filters=self.first_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="infer_sig_conv_0_3")
+             if use_sig_convs else
+             ReparameterizedConv2D(kernel_size=(5, 5),
+                                   strides=2,
+                                   filters=self.first_deterministic_filters,
+                                   padding="same")
+             ),
+
         ]
 
         # The first deterministic generative block is the pseudoinverse of the inference block
         self.first_gen_block = [
             tf.nn.elu,
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
-                                           filters=self.first_deterministic_filters,
-                                           padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_up=2,
+                          filters=self.first_deterministic_filters,
+                          corr=False,
+                          padding="reflect",
+                          use_bias=True,
+                          name="gen_sig_conv_0_0")
+             if use_sig_convs else
+             ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                            strides=2,
+                                            filters=self.first_deterministic_filters,
+                                            padding="same")),
 
             (GDN(inverse=True, name="gen_gdn_0") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
-                                           filters=self.first_deterministic_filters,
-                                           padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_up=2,
+                          filters=self.first_deterministic_filters,
+                          corr=False,
+                          padding="reflect",
+                          use_bias=True,
+                          name="gen_sig_conv_0_1")
+             if use_sig_convs else
+             ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                            strides=2,
+                                            filters=self.first_deterministic_filters,
+                                            padding="same")),
 
             (GDN(inverse=True, name="gen_gdn_1") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
-                                           filters=self.first_deterministic_filters,
-                                           padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_up=2,
+                          filters=self.first_deterministic_filters,
+                          corr=False,
+                          padding="reflect",
+                          use_bias=True,
+                          name="gen_sig_conv_0_2")
+             if use_sig_convs else
+             ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                            strides=2,
+                                            filters=self.first_deterministic_filters,
+                                            padding="same")),
 
             (GDN(inverse=True, name="gen_gdn_2") if use_gdn else tf.nn.elu),
 
-            ReparameterizedConv2DTranspose(kernel_size=self.first_kernel_size,
-                                           strides=self.first_strides,
-                                           filters=3,
-                                           padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_up=2,
+                          filters=3,
+                          corr=False,
+                          padding="reflect",
+                          use_bias=True,
+                          name="gen_sig_conv_0_3")
+             if use_sig_convs else
+             ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                            strides=2,
+                                            filters=3,
+                                            padding="same")),
         ]
 
         # The second deterministic inference block downsamples by another 4x4
         self.second_infer_block = [
-            ReparameterizedConv2D(kernel_size=(3, 3),
-                                  strides=(1, 1),
-                                  filters=self.second_deterministic_filters,
-                                  padding="same"),
+            (SignalConv2D(kernel=(3, 3),
+                          strides_down=1,
+                          corr=True,
+                          filters=self.second_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="infer_sig_conv_1_0")
+             if use_sig_convs else
+             ReparameterizedConv2D(kernel_size=(3, 3),
+                                   strides=1,
+                                   filters=self.second_deterministic_filters,
+                                   padding="same")),
             tf.nn.elu,
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
-                                  filters=self.second_deterministic_filters,
-                                  padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_down=2,
+                          corr=True,
+                          filters=self.second_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="infer_sig_conv_1_1")
+             if use_sig_convs else
+             ReparameterizedConv2D(kernel_size=(5, 5),
+                                   strides=2,
+                                   filters=self.second_deterministic_filters,
+                                   padding="same")),
             tf.nn.elu,
-            ReparameterizedConv2D(kernel_size=self.kernel_size,
-                                  strides=self.strides,
-                                  filters=self.second_deterministic_filters,
-                                  padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_down=2,
+                          corr=True,
+                          filters=self.second_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="infer_sig_conv_1_2")
+             if use_sig_convs else
+             ReparameterizedConv2D(kernel_size=(5, 5),
+                                   strides=2,
+                                   filters=self.second_deterministic_filters,
+                                   padding="same")),
         ]
 
         self.second_gen_block = [
             tf.nn.elu,
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
-                                           filters=self.second_deterministic_filters,
-                                           padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_up=2,
+                          corr=False,
+                          filters=self.second_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="gen_sig_conv_1_0")
+             if use_sig_convs else
+             ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                            strides=2,
+                                            filters=self.second_deterministic_filters,
+                                            padding="same")),
             tf.nn.elu,
-            ReparameterizedConv2DTranspose(kernel_size=self.kernel_size,
-                                           strides=self.strides,
-                                           filters=self.second_deterministic_filters,
-                                           padding="same"),
+            (SignalConv2D(kernel=(5, 5),
+                          strides_up=2,
+                          corr=False,
+                          filters=self.second_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="gen_sig_conv_1_1")
+             if use_sig_convs else
+             ReparameterizedConv2DTranspose(kernel_size=(5, 5),
+                                            strides=2,
+                                            filters=self.second_deterministic_filters,
+                                            padding="same")),
             tf.nn.elu,
-            ReparameterizedConv2DTranspose(kernel_size=(3, 3),
-                                           strides=(1, 1),
-                                           filters=self.first_deterministic_filters,
-                                           padding="same")
+            (SignalConv2D(kernel=(3, 3),
+                          strides_up=1,
+                          corr=False,
+                          filters=self.first_deterministic_filters,
+                          padding="reflect",
+                          use_bias=True,
+                          name="gen_sig_conv_1_2")
+             if use_sig_convs else
+             ReparameterizedConv2DTranspose(kernel_size=(3, 3),
+                                            strides=1,
+                                            filters=self.first_deterministic_filters,
+                                            padding="same")),
         ]
 
         # Create Stochastic Residual Blocks
@@ -200,6 +318,7 @@ class LargeResNetVAE(tfk.Model):
             is_last=False,
             use_iaf=False,
             kl_per_partition=self.kl_per_partition,
+            use_sig_convs=use_sig_convs,
             name=f"resnet_block_1"
         )
 
@@ -214,6 +333,7 @@ class LargeResNetVAE(tfk.Model):
             is_last=True,
             use_iaf=False,
             kl_per_partition=self.kl_per_partition,
+            use_sig_convs=use_sig_convs,
             name=f"resnet_block_2"
         )
 
@@ -251,6 +371,7 @@ class LargeResNetVAE(tfk.Model):
 
         def discretized_logistic(reference, reconstruction, binsize=1. / 256.):
 
+            reconstruction = tf.clip_by_value(reconstruction, -0.5 + 1. / 512., 0.5 - 1. / 512.)
             # Discretize the output
             discretized_input = tf.math.floor(reference / binsize) * binsize
             discretized_input = (discretized_input - reconstruction) / likelihood_scale
@@ -262,13 +383,33 @@ class LargeResNetVAE(tfk.Model):
             return tf.reduce_sum(log_likelihood, [1, 2, 3])
 
         def gaussian_log_prob(reference, reconstruction):
-            likelihood = tfd.Normal(loc=reconstruction, scale=likelihood_scale)
-            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+            # likelihood = tfd.Normal(loc=reconstruction, scale=likelihood_scale)
+            # return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3]) * 255.**2.
 
-        def laplace_log_prob(reference, reconstruction):
-            likelihood = tfd.Laplace(loc=reconstruction, scale=likelihood_scale)
+            return -tf.reduce_sum(tf.math.squared_difference(reference, reconstruction) / likelihood_scale,
+                                  [1, 2, 3]) * 255. ** 2.
 
-            return tf.reduce_sum(likelihood.log_prob(reference), [1, 2, 3])
+        def laplace_log_prob(reference, reconstruction, blur=False):
+            # likelihood = tfd.Laplace(loc=reconstruction, scale=likelihood_scale)
+            # log_prob = likelihood.log_prob(reference)
+
+            log_prob = tf.abs(reconstruction - reference) / likelihood_scale
+
+            if blur:
+                # Parameters taken from https://github.com/tensorflow/tensorflow/blob/e5bf8de410005de06a7ff5393fafdf832ef1d4ad/tensorflow/python/ops/image_ops_impl.py#L3314-L3438
+                log_prob = gaussian_blur(log_prob, kernel_size=11, sigma=8.)
+
+            return tf.reduce_sum(log_prob, [1, 2, 3]) * 255.
+
+        def ms_ssim_pseudo_log_prob(reference, reconstruction):
+            ms_ssim = tf.image.ssim_multiscale(reference,
+                                               reconstruction,
+                                               power_factors=(1., 1., 1., 1., 1.),
+                                               max_val=1.)
+
+            # The ms-ssim is averaged across the non-batch dimensions, so we multipy back up
+            # Note: 1. - ms_ssim would correspond to a negative log prob, hence we reverse it.
+            return (ms_ssim - 1.) * tf.cast(tf.reduce_prod(reference.shape[1:]), tf.float32) * 255.
 
         if self._likelihood_function == "discretized_logistic":
             return discretized_logistic
@@ -278,6 +419,18 @@ class LargeResNetVAE(tfk.Model):
 
         elif self._likelihood_function == "laplace":
             return laplace_log_prob
+
+        elif self._likelihood_function == "ms-ssim":
+            return ms_ssim_pseudo_log_prob
+
+        elif self._likelihood_function == "ms-ssim-laplace":
+            def combined_loss(a, b, alpha=0.84):
+                ms_ssim_contribution = alpha * ms_ssim_pseudo_log_prob(a, b)
+                laplace_contribution = (1. - alpha) * laplace_log_prob(a, b, blur=True)
+
+                return ms_ssim_contribution + laplace_contribution
+
+            return combined_loss
         else:
             raise NotImplementedError
 
@@ -317,15 +470,15 @@ class LargeResNetVAE(tfk.Model):
         for layer in self.first_gen_block:
             tensor = layer(tensor)
 
-        reconstruction = tf.clip_by_value(tensor, -0.5 + 1. / 512., 0.5 - 1. / 512.)
-
         # Calculate log likelihood
-        log_likelihood = self.likelihood_function(input, reconstruction)
+        log_likelihood = self.likelihood_function(input, tensor)
         self.log_likelihood = tf.reduce_mean(log_likelihood)
 
         # If it's the initialization round, create our EMA shadow variables
         if not self.is_ema_variables_initialized:
             self.create_ema_variables()
+
+        reconstruction = tf.clip_by_value(tensor, -0.5 + 1. / 512., 0.5 - 1. / 512.)
 
         return reconstruction + 0.5
 

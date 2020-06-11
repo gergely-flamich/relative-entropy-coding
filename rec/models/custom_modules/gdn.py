@@ -29,18 +29,18 @@ class GDN(tfl.Layer):
     def __init__(self,
                  inverse: bool,
                  gamma_init: float = 0.1,
-                 beta_minimum=1e-6,
-                 gamma_minimum=0.,
-                 reparam_offset=2 ** -18,
-                 name="gdn_layer",
+                 beta_minimum: float = 1e-6,
+                 gamma_minimum: float = 0.,
+                 reparam_offset: float = 2. ** -18,
+                 name: str = "gdn_layer",
                  **kwargs):
         super().__init__(name=name, **kwargs)
 
-        self._inverse = inverse
-        self.gamma_init = gamma_init
-        self.beta_minimum = beta_minimum
-        self.gamma_minimum = gamma_minimum
-        self.reparam_offset = reparam_offset
+        self._inverse = bool(inverse)
+        self.gamma_init = float(gamma_init)
+        self.beta_minimum = float(beta_minimum)
+        self.gamma_minimum = float(gamma_minimum)
+        self.reparam_offset = float(reparam_offset)
 
         self.pedestal = tf.constant(self.reparam_offset ** 2, dtype=self.dtype)
         self.beta_bound = tf.constant((self.beta_minimum + self.reparam_offset ** 2) ** 0.5,
@@ -57,11 +57,11 @@ class GDN(tfl.Layer):
 
     @property
     def beta(self):
-        return tf.square(lower_bound(self._beta, self.beta_minimum)) - self.pedestal
+        return tf.square(lower_bound(self._beta, self.beta_bound)) - self.pedestal
 
     @property
     def gamma(self):
-        return tf.square(lower_bound(self._gamma, self.gamma_minimum)) - self.pedestal
+        return tf.square(lower_bound(self._gamma, self.gamma_bound)) - self.pedestal
 
     def build(self, input_shape):
         input_shape = tf.TensorShape(input_shape)

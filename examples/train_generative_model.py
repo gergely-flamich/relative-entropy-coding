@@ -32,11 +32,11 @@ def print_dict(d):
 
 @ex.config
 def default_config(dataset_info):
-
     # Model configurations
     model_save_base_dir = "/scratch/gf332/models/relative-entropy-coding"
 
     model = "resnet_vae"
+    optimizer = "adamax"
 
     lossy = False
 
@@ -44,8 +44,13 @@ def default_config(dataset_info):
         # Average Bits per pixel
         target_bpp = 0.1
 
+        bpp_buffer_size = 30
+
         # Start adjusting Beta after the given number of iterations
-        adjust_beta_after_iters = 50000
+        adjust_beta_after_iters = 100000
+
+        # Beta will be adjusted until iteration adjust_beta_after_iters + stop_adjust_after_iters
+        stop_adjust_after_iters = 50000
 
     if model == "vae":
         latent_size = 50
@@ -74,7 +79,7 @@ def default_config(dataset_info):
         }
 
         model_config = {
-	        "sampler": "importance",
+            "sampler": "importance",
             "sampler_args": sampler_args,
             "use_iaf": use_iaf,
             "latent_size": "variable",
@@ -97,10 +102,12 @@ def default_config(dataset_info):
 
     elif model == "large_resnet_vae":
 
+        optimizer = "adam"
         distribution = "gaussian"
         likelihood_function = "laplace"
         learn_likelihood_scale = False
         use_gdn = True
+        use_sig_convs = True
 
         lossy = True
 
@@ -114,16 +121,17 @@ def default_config(dataset_info):
 
         model_config = {
             "use_gdn": use_gdn,
+            "use_sig_convs": use_sig_convs,
             "distribution": distribution,
             "sampler": "beam_search",
             "sampler_args": sampler_args,
             "latent_size": "variable",
-            "first_deterministic_filters": 192,
-            "first_stochastic_filters": 192,
+            "first_deterministic_filters": 196,
+            "first_stochastic_filters": 196,
             "second_deterministic_filters": 128,
             "second_stochastic_filters": 128,
             "likelihood_function": likelihood_function,
-            "learn_likelihood_scale": learn_likelihood_scale
+            "learn_likelihood_scale": learn_likelihood_scale,
         }
 
         learning_rate = 1e-3
@@ -139,13 +147,13 @@ def default_config(dataset_info):
     iters = 3000000
 
     shuffle_buffer_size = 5000
-    batch_size = 4
+    batch_size = 8
     num_prefetch = 32
 
     # ELBO related stuff
     beta = 1.
-    anneal = False # Whether to anneal Beta at the start
-    annealing_end = 50000  # Steps after which beta is fixed
+    anneal = False  # Whether to anneal Beta at the start
+    annealing_end = 100000  # Steps after which beta is fixed
     drop_learning_rate_after_iter = 50000
     learning_rate_drop_rate = 0.3
 
@@ -213,6 +221,9 @@ def train_vae(dataset,
     # Training Loop
     # -------------------------------------------------------------------------
 
+    def train_step():
+        pass
+
     # Initialize the model weights
     model(tf.zeros([1, 28, 28, 1]))
 
@@ -229,7 +240,7 @@ def train_vae(dataset,
         ckpt.step.assign_add(1)
 
         # Decrease learning rate after a while
-        #if int(ckpt.step) == drop_learning_rate_after_iter:
+        # if int(ckpt.step) == drop_learning_rate_after_iter:
         #    learn_rate.assign(learning_rate_after_drop)
 
         with tf.GradientTape() as tape:
@@ -293,6 +304,7 @@ def train_resnet_vae(dataset,
                      batch_size,
                      shuffle_buffer_size,
                      num_prefetch,
+                     optimizer,
                      learning_rate,
                      iters,
                      beta,
@@ -305,9 +317,9 @@ def train_resnet_vae(dataset,
                      _log,
                      lossy,
                      target_bpp=None,
-                     adjust_beta_after_iters = None):
-
-
+                     bpp_buffer_size=None,
+                     adjust_beta_after_iters=None,
+                     stop_adjust_after_iters=None):
     # -------------------------------------------------------------------------
     # Prepare the dataset
     # -------------------------------------------------------------------------
@@ -334,7 +346,12 @@ def train_resnet_vae(dataset,
     # Create Optimizer
     # -------------------------------------------------------------------------
     learn_rate = tf.Variable(learning_rate)
-    optimizer = tf.optimizers.Adamax(learn_rate)
+
+    # Initialize optimizer with appropriate learning rate
+    optimizer = {
+        "adamax": tf.optimizers.Adamax,
+        "adam": tf.optimizers.Adam,
+    }[optimizer](learn_rate)
 
     # Initialize the model weights
     for first_pass in dataset.take(1):
@@ -345,10 +362,10 @@ def train_resnet_vae(dataset,
     # Create Checkpoints
     # -------------------------------------------------------------------------
     ckpt = tf.train.Checkpoint(step=tf.Variable(1, dtype=tf.int64),
-                               learn_rate=learn_rate,
                                model=model,
-                               beta=beta,
-                               optimizer=optimizer)
+                               learn_rate=learn_rate,
+                               optimizer=optimizer,
+                               beta=beta)
 
     manager = tf.train.CheckpointManager(ckpt, model_save_dir, max_to_keep=3)
 
@@ -373,6 +390,7 @@ def train_resnet_vae(dataset,
             kld = model.kl_divergence(empirical=True, minimum_kl=lamb)
 
             bpp = kld / (num_pixels * log_2)
+
             if lossy and int(ckpt.step) > adjust_beta_after_iters:
                 if bpp > target_bpp + 1e-2:
                     beta.assign(beta * 1.001)
@@ -398,13 +416,19 @@ def train_resnet_vae(dataset,
 
         return loss, reconstruction, kld, bpp, log_likelihood, current_beta, true_kls
 
-
     # Restore previous session
     ckpt.restore(manager.latest_checkpoint)
     if manager.latest_checkpoint:
         _log.info(f"Restored model from {manager.latest_checkpoint}")
+        _log.info(f"Restored learning rate: {learn_rate}")
+
+        if learn_rate > learning_rate:
+            learn_rate.assign(learning_rate)
+            _log.info(f"Learning rate was reassigned to: {learn_rate}")
     else:
         _log.info("Initializing model from scratch.")
+
+    bpp_buffer = tf.zeros(bpp_buffer_size, dtype=beta.dtype)
 
     for batch in dataset.take(iters - int(ckpt.step)):
 
@@ -430,9 +454,6 @@ def train_resnet_vae(dataset,
 
         if tf.math.is_nan(loss) or tf.math.is_inf(loss) or kld == 0.:
             raise Exception(f"Loss blew up: {loss:.3f}, NLL: {-log_likelihood:.3f}, KL: {kld:.3f}")
-
-        # Once the model parameters are updated, we also update their exponential moving average.
-        model.update_ema_variables()
 
         if int(ckpt.step) % tensorboard_log_freq == 1:
             # Save model
