@@ -116,4 +116,6 @@ we added the number of auxiliary bits required to the asymptotic compression rat
 ### Lossy Image Compression on Kodak
 ![PSNR Comparison](plots/lossy_compression/method_psnr_comparison.png)
 ![MS-SSIM Comparison](plots/lossy_compression/method_ms_ssim_comparison.png)
+
+
 **Note:** The MS-SSIM comparisons are in decibels, calculated using the formula `-10 * log10(1 - MS-SSIM)`.
